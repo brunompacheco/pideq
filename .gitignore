@@ -130,3 +130,6 @@ dmypy.json
 
 # wandb files
 wandb/
+
+# vscode stuff
+.vscode/
