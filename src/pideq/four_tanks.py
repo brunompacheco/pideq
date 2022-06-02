@@ -22,6 +22,6 @@ def four_tanks(y, u):
         [    0,     0,     0, -a[3]],
     ]).to(y.device)
 
-    A = torch.Tensor([1/28, 1/32, 1/28, 1/32]).unsqueeze(-1).to(y.device)
+    A = torch.Tensor([1/28, 1/32, 1/28, 1/32]).unsqueeze(0).to(y.device)
 
-    return A * (K @ u + W @ torch.sqrt(2*g*y))
+    return A * (u @ K.T + torch.sqrt(2*g*y) @ W.T)
