@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import logging
 import random
 
@@ -13,6 +14,8 @@ import wandb
 
 from torchdiffeq import odeint
 from torch.cuda.amp import autocast, GradScaler
+
+from pideq.four_tanks import four_tanks
 
 
 def timeit(fun):
@@ -46,7 +49,7 @@ class Trainer(ABC):
     def __init__(self, net: nn.Module, epochs=5, lr= 0.1,
                  optimizer: str = 'Adam', optimizer_params: dict = None,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
-                 lr_scheduler_params: dict = None,
+                 lr_scheduler_params: dict = None, mixed_precision=True,
                  device=None, wandb_project=None, wandb_group=None,
                  logger=None, checkpoint_every=50, random_seed=42) -> None:
         self._is_initalized = False
@@ -69,6 +72,8 @@ class Trainer(ABC):
         self.loss_func = loss_func
         self.lr_scheduler = lr_scheduler
         self.lr_scheduler_params = lr_scheduler_params
+
+        self.mixed_precision = mixed_precision
 
         if logger is None:
             logging.basicConfig(level=logging.INFO)
@@ -160,6 +165,12 @@ class Trainer(ABC):
 
         self._loss_func = eval(f"nn.{self.loss_func}()")
 
+        if self.mixed_precision:
+            self._scaler = GradScaler()
+            self.autocast_if_mp = autocast
+        else:
+            self.autocast_if_mp = nullcontext
+
         self.prepare_data()
 
         self._is_initalized = True
@@ -190,6 +201,7 @@ class Trainer(ABC):
                 "optimizer": self.optimizer,
                 "lr_scheduler": self.lr_scheduler,
                 "lr_scheduler_params": self.lr_scheduler_params,
+                "mixed_precision": self.mixed_precision,
                 "loss_func": self.loss_func,
                 "random_seed": self.random_seed,
                 "device": self.device,
@@ -200,6 +212,12 @@ class Trainer(ABC):
             self.initialize_wandb()
 
         self._loss_func = eval(f"nn.{self.loss_func}()")
+
+        if self.mixed_precision:
+            self._scaler = GradScaler()
+            self.autocast_if_mp = autocast
+        else:
+            self.autocast_if_mp = nullcontext
 
         self.l.info('Preparing data')
         self.prepare_data()
@@ -251,7 +269,6 @@ class Trainer(ABC):
         if not self._is_initalized:
             self.setup_training()
 
-        self._scaler = GradScaler()
         while self._e < self.epochs:
             self.l.info(f"Epoch {self._e} started ({self._e+1}/{self.epochs})")
             epoch_start_time = time()
@@ -298,17 +315,20 @@ class Trainer(ABC):
 
                 self._optim.zero_grad()
 
-                with autocast():
+                with self.autocast_if_mp():
                     y_hat = self.net(X)
 
                     loss = self._loss_func(y_hat, y)
 
-                self._scaler.scale(loss).backward()
+                if self.mixed_precision:
+                    self._scaler.scale(loss).backward()
+                    self._scaler.step(self._optim)
+                    self._scaler.update()
+                else:
+                    loss.backwad()
+                    self._optim.step()
 
                 train_loss += loss.item() * len(y)
-
-                self._scaler.step(self._optim)
-                self._scaler.update()
 
             if self.lr_scheduler is not None:
                 self._scheduler.step()
@@ -327,7 +347,7 @@ class Trainer(ABC):
                 X = X.to(self.device)
                 y = y.to(self.device)
 
-                with autocast():
+                with self.autocast_if_mp():
                     y_hat = self.net(X)
                     loss_value = self._loss_func(y_hat, y).item()
 
@@ -364,53 +384,34 @@ class Trainer(ABC):
 
 class Trainer4T(Trainer):
     """Trainer for the 4 Tank system."""
-    def __init__(self, net: nn.Module, y0: np.ndarray, Nf=1e5, T=200,
-                 val_dt=1., epochs=5, lr=0.1, optimizer: str = 'Adam',
-                 optimizer_params: dict = None, lamb=0.1,
-                 loss_func: str = 'MSELoss', lr_scheduler: str = None,
-                 lr_scheduler_params: dict = None, device=None,
-                 wandb_project=None, wandb_group=None, logger=None,
-                 checkpoint_every=50, random_seed=42):
-        self.Nf = int(Nf)    # number of collocation points
-        self.y0 = y0  # initial conditions
-        self.val_dt = val_dt
-
-        self.T = T
-
-        if lamb is None:
-            self.lamb = 1 / self.Nf
-        else:
-            self.lamb = lamb
-
-        self.data = None
-        self.val_data = None
-
-        self._wandb_config = {
-            'T': self.T,
-            'y0': self.y0,
-        }
-
-        super().__init__(net, epochs, lr, optimizer, optimizer_params,
-                         loss_func, lr_scheduler, lr_scheduler_params, device,
-                         wandb_project, wandb_group, logger, checkpoint_every,
-                         random_seed)
-
-class VdPTrainerPINN(Trainer):
-    def __init__(self, net: nn.Module, y0: np.ndarray, Nf=1e5, f: Callable,
-                 y_bounds=(-3, 3), T=20., val_dt=0.1, epochs=5, lr=0.1,
-                 optimizer: str = 'Adam', optimizer_params: dict = None,
-                 lamb=0.1, loss_func: str = 'MSELoss',
-                 lr_scheduler: str = None, lr_scheduler_params: dict = None,
-                 device=None, wandb_project="pideq", wandb_group="PINN",
+    def __init__(self, net: nn.Module, y0=np.array([12.6, 13.0, 4.8, 4.9]),
+                 u0=np.array([3.15, 3.15]), Nf=1e5, T=200, val_dt=1., epochs=5,
+                 lr=0.1, optimizer: str = 'Adam', optimizer_params: dict = None,
+                 lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
+                 mixed_precision=True, lr_scheduler_params: dict = None,
+                 device=None, wandb_project="pideq-4t", wandb_group=None,
                  logger=None, checkpoint_every=50, random_seed=42):
+        self._wandb_config = {
+            'T': T,
+            'y0': y0,
+            'u0': u0,
+        }
+
+        super().__init__(net, epochs, lr, optimizer, optimizer_params,
+                         loss_func, lr_scheduler, lr_scheduler_params,
+                         mixed_precision, device, wandb_project,
+                         wandb_group, logger, checkpoint_every, random_seed)
+
         self.Nf = int(Nf)    # number of collocation points
-        self.y0 = y0  # initial conditions
-        self.y_bounds = y_bounds
         self.val_dt = val_dt
 
-        self.T = T
+        # initial state
+        self.y0 = torch.from_numpy(y0).view(1,y0.shape[0]).to(self.device)
 
-        self.f = f
+        # initial control
+        self.u0 = torch.from_numpy(u0).view(1,u0.shape[0]).to(self.device)
+
+        self.T = T
 
         if lamb is None:
             self.lamb = 1 / self.Nf
@@ -420,15 +421,7 @@ class VdPTrainerPINN(Trainer):
         self.data = None
         self.val_data = None
 
-        self._wandb_config = {
-            'T': self.T,
-            'y0': self.y0,
-        }
-
-        super().__init__(net, epochs, lr, optimizer, optimizer_params,
-                         loss_func, lr_scheduler, lr_scheduler_params, device,
-                         wandb_project, wandb_group, logger, checkpoint_every,
-                         random_seed)
+        self.f = four_tanks
 
     def prepare_data(self):
         X = torch.rand(self.Nf,1) * self.T
@@ -436,13 +429,11 @@ class VdPTrainerPINN(Trainer):
         self.data = X.to(self.device)
 
         if self.val_data is None:
-            K = int(self.T / self.val_dt)
+            K = int(0.5 + self.T / self.val_dt)
 
             X_val = torch.Tensor([i * self.val_dt for i in range(K+1)])
 
-            u = torch.zeros(1, 1)  # uncontrolled
-            Y_val = odeint(lambda t, y: self.f(y,u),
-                           torch.Tensor(self.y0).unsqueeze(0), X_val,
+            Y_val = odeint(lambda t, y: self.f(y,self.u0), self.y0, X_val,
                            method='rk4')
 
             self.val_data = (
@@ -479,12 +470,19 @@ class VdPTrainerPINN(Trainer):
 
         return data_to_log, val_score
 
+    def get_loss_f(self, y_pred, x):
+        dy_pred = torch.autograd.grad(y_pred.sum(), x, create_graph=True)[0]
+
+        dy = self.f(y_pred, self.u0.to(y_pred))
+
+        return self._loss_func(dy_pred, dy)
+
     def train_pass(self):
         self.net.train()
 
         # boundary
         X_t = torch.zeros(1,1).to(self.device)
-        Y_t = torch.Tensor(self.y_0).unsqueeze(0).to(self.device)
+        Y_t = self.y0.clone().to(self.device)
 
         # collocation
         X_f = self.data
@@ -494,44 +492,24 @@ class VdPTrainerPINN(Trainer):
         with torch.set_grad_enabled(True):
             self._optim.zero_grad()
 
-            with autocast():
-                y_t_pred = self.net(X_t)
+            with self.autocast_if_mp():
+                Y_t_pred = self.net(X_t)
 
-                dy_t_pred = torch.autograd.grad(
-                    y_t_pred.sum(),
-                    X_t,
-                    create_graph=True,
-                )[0]
-
-                Y_t_pred = torch.stack([y_t_pred, dy_t_pred], dim=-1).squeeze(1)
-
-                loss_y = self._loss_func(Y_t_pred, Y_t)
+                loss_y = self._loss_func(Y_t_pred, Y_t.to(Y_t_pred))
 
                 y_pred = self.net(X_f)
 
-                dy_pred = torch.autograd.grad(
-                    y_pred.sum(),
-                    X_f,
-                    create_graph=True,
-                )[0]
-
-                ddy_pred = torch.autograd.grad(
-                    dy_pred.sum(),
-                    X_f,
-                    create_graph=True,
-                )[0]
-
-                mu = 1.
-                ddy = + mu * (1 - y_pred ** 2) * dy_pred - y_pred
-                ode = ddy_pred - ddy
-                loss_f = self._loss_func(ode, torch.zeros_like(ode))
+                loss_f = self.get_loss_f(y_pred, X_f)
 
                 loss = loss_y + self.lamb * loss_f
 
-            self._scaler.scale(loss).backward()
-
-            self._scaler.step(self._optim)
-            self._scaler.update()
+            if self.mixed_precision:
+                self._scaler.scale(loss).backward()
+                self._scaler.step(self._optim)
+                self._scaler.update()
+            else:
+                loss.backwad()
+                self._optim.step()
 
             if self.lr_scheduler is not None:
                 self._scheduler.step()
@@ -546,43 +524,22 @@ class VdPTrainerPINN(Trainer):
         X.requires_grad_()
         with torch.set_grad_enabled(True):
             self._optim.zero_grad()
-            y_pred = self.net(X)
+            Y_pred = self.net(X)
 
-        dy_pred = torch.autograd.grad(
-            y_pred.sum(),
-            X,
-            create_graph=False,
-        )[0]
-
-        Y_pred = torch.stack([y_pred, dy_pred], dim=-1).squeeze(1)
-
-        iae = (Y - Y_pred).abs().mean().item()
-
-        partial_ix = (X <= self.curr_T).squeeze()
-        X_part = X[partial_ix]
-        Y_part = Y[partial_ix]
-
-        X_part.requires_grad_()
-        with torch.set_grad_enabled(True):
-            self._optim.zero_grad()
-            y_part_pred = self.net(X_part)
-
-        dy_part_pred = torch.autograd.grad(
-            y_part_pred.sum(),
-            X_part,
-            create_graph=False,
-        )[0]
-
-        Y_part_pred = torch.stack([y_part_pred, dy_part_pred], dim=-1).squeeze(1)
-
-        partial_iae = (Y_part - Y_part_pred).abs().mean().item()
+        iae = (Y - Y_pred).abs().sum().item() / self.val_dt
+        mae = (Y - Y_pred).abs().mean().item()
 
         if self._e % 500 == 0 and self._log_to_wandb:
             data = [[x,y1,y2] for x,y1,y2 in zip(
                 X.squeeze().cpu().detach().numpy(),
                 Y_pred[:,0].squeeze().cpu().detach().numpy(),
                 Y_pred[:,1].squeeze().cpu().detach().numpy(),
+                Y_pred[:,2].squeeze().cpu().detach().numpy(),
+                Y_pred[:,3].squeeze().cpu().detach().numpy(),
             )]
-            wandb.log({'dynamics': wandb.Table(data=data, columns=['t', 'y1', 'y2'])})
+            wandb.log({
+                'dynamics': wandb.Table(data=data,
+                                        columns=['t', 'h1', 'h2', 'h3', 'h4'])
+            })
 
-        return iae, partial_iae
+        return iae, mae
