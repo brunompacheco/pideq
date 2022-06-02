@@ -5,7 +5,6 @@ import random
 from abc import ABC, abstractmethod
 from pathlib import Path
 from time import time
-from typing import Callable
 
 import numpy as np
 import torch
@@ -14,6 +13,7 @@ import wandb
 
 from torchdiffeq import odeint
 from torch.cuda.amp import autocast, GradScaler
+from torch.autograd import grad
 
 from pideq.four_tanks import four_tanks
 
@@ -471,11 +471,16 @@ class Trainer4T(Trainer):
         return data_to_log, val_score
 
     def get_loss_f(self, y_pred, x):
-        dy_pred = torch.autograd.grad(y_pred.sum(), x, create_graph=True)[0]
+        dy_i_preds = list()
+        for i in range(y_pred.shape[-1]):
+            dy_i_preds.append(grad(y_pred[:,-1].sum(), x, create_graph=True)[0])
 
-        dy = self.f(y_pred, self.u0.to(y_pred))
+        Jy_pred = torch.stack(dy_i_preds, dim=-1).squeeze(1)
 
-        return self._loss_func(dy_pred, dy)
+        u0_ = self.u0.to(y_pred).repeat(y_pred.shape[0],1)
+        Jy = self.f(y_pred, u0_)
+
+        return self._loss_func(Jy_pred, Jy)
 
     def train_pass(self):
         self.net.train()
@@ -508,7 +513,7 @@ class Trainer4T(Trainer):
                 self._scaler.step(self._optim)
                 self._scaler.update()
             else:
-                loss.backwad()
+                loss.backward()
                 self._optim.step()
 
             if self.lr_scheduler is not None:
@@ -530,7 +535,7 @@ class Trainer4T(Trainer):
         mae = (Y - Y_pred).abs().mean().item()
 
         if self._e % 500 == 0 and self._log_to_wandb:
-            data = [[x,y1,y2] for x,y1,y2 in zip(
+            data = [[x,h1,h2,h3,h4] for x,h1,h2,h3,h4 in zip(
                 X.squeeze().cpu().detach().numpy(),
                 Y_pred[:,0].squeeze().cpu().detach().numpy(),
                 Y_pred[:,1].squeeze().cpu().detach().numpy(),
