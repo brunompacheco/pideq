@@ -11,7 +11,7 @@ def four_tanks(y, u):
         [0, g[1]*k[1]],
         [0, (1-g[1])*k[1]],
         [(1-g[0])*k[0], 0],
-    ]).to(y.device)
+    ]).to(y)
 
     a = [.071, .057, .071, .057]
     g = 981
@@ -20,8 +20,8 @@ def four_tanks(y, u):
         [    0, -a[1],     0,  a[3]],
         [    0,     0, -a[2],     0],
         [    0,     0,     0, -a[3]],
-    ]).to(y.device)
+    ]).to(y)
 
-    A = torch.Tensor([1/28, 1/32, 1/28, 1/32]).unsqueeze(0).to(y.device)
+    A = torch.Tensor([1/28, 1/32, 1/28, 1/32]).unsqueeze(0).to(y)
 
     return A * (u @ K.T + torch.sqrt(2*g*y) @ W.T)
