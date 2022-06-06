@@ -19,6 +19,12 @@ from pideq.deq.model import DEQ
 from pideq.four_tanks import four_tanks
 
 
+def f(y, u, mu=1.):
+    return torch.stack((
+        y[...,1],
+        mu * (1 - y[...,0]**2) * y[...,1] - y[...,0] + u[...,0]
+    ),dim=-1)
+
 def timeit(fun):
     def fun_(*args, **kwargs):
         start_time = time()
@@ -387,8 +393,8 @@ class Trainer(ABC):
 
 class Trainer4T(Trainer):
     """Trainer for the 4 Tank system."""
-    def __init__(self, net: nn.Module, y0=np.array([12.6, 13.0, 4.8, 4.9]),
-                 u0=np.array([3.15, 3.15]), Nf=1e5, T=200, val_dt=1., epochs=5,
+    def __init__(self, net: nn.Module, y0=np.array([0., .1]),
+                 u0=np.array([0.]), Nf=1e5, T=200, val_dt=1., epochs=5,
                  lr=0.1, optimizer: str = 'Adam', optimizer_params: dict = None,
                  lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  mixed_precision=True, lr_scheduler_params: dict = None,
@@ -424,7 +430,7 @@ class Trainer4T(Trainer):
         self.data = None
         self.val_data = None
 
-        self.f = four_tanks
+        self.f = f
 
     def prepare_data(self):
         X = torch.rand(self.Nf,1) * self.T
@@ -474,16 +480,34 @@ class Trainer4T(Trainer):
         return data_to_log, val_score
 
     def get_loss_f(self, y_pred, x):
-        dy_i_preds = list()
-        for i in range(y_pred.shape[-1]):
-            dy_i_preds.append(grad(y_pred[:,i].sum(), x, create_graph=True)[0])
+        dy_pred = torch.autograd.grad(
+            y_pred.sum(),
+            x,
+            create_graph=True,
+        )[0]
 
-        Jy_pred = torch.stack(dy_i_preds, dim=-1).squeeze(1)
+        ddy_pred = torch.autograd.grad(
+            dy_pred.sum(),
+            x,
+            create_graph=True,
+        )[0]
 
-        u0_ = self.u0.to(y_pred).repeat(y_pred.shape[0],1)
-        Jy = self.f(y_pred, u0_)
+        mu = 1.
+        ddy = + mu * (1 - y_pred ** 2) * dy_pred - y_pred
+        ode = ddy_pred - ddy
 
-        return self._loss_func(Jy_pred, Jy)
+        # dy_i_preds = list()
+        # for _ in range(y_pred.shape[-1]):
+        #     dy_i_preds.append(grad(y_pred[:,-1].sum(), x, create_graph=True)[0])
+
+        # Jy_pred = torch.stack(dy_i_preds, dim=-1).squeeze(1)
+
+        # u0_ = self.u0.to(y_pred).repeat(y_pred.shape[0],1)
+        # Jy = self.f(y_pred, u0_)
+
+        # ode = Jy_pred - Jy
+
+        return self._loss_func(ode, torch.zeros_like(ode))
 
     def train_pass(self):
         self.net.train()
@@ -503,7 +527,15 @@ class Trainer4T(Trainer):
                     self._optim.zero_grad()
 
                 with self.autocast_if_mp():
-                    Y_t_pred = self.net(X_t)
+                    y_t_pred = self.net(X_t)
+
+                    dy_t_pred = torch.autograd.grad(
+                        y_t_pred.sum(),
+                        X_t,
+                        create_graph=True,
+                    )[0]
+
+                    Y_t_pred = torch.stack([y_t_pred, dy_t_pred], dim=-1).squeeze(1)
 
                     global loss_y
                     loss_y = self._loss_func(Y_t_pred, Y_t.to(Y_t_pred))
@@ -547,23 +579,31 @@ class Trainer4T(Trainer):
         X.requires_grad_()
         with torch.set_grad_enabled(True):
             self._optim.zero_grad()
-            Y_pred = self.net(X)
+            y_pred = self.net(X)
+
+        dy_pred = torch.autograd.grad(
+            y_pred.sum(),
+            X,
+            create_graph=False,
+        )[0]
+
+        Y_pred = torch.stack([y_pred, dy_pred], dim=-1).squeeze(1)
 
         iae = (Y - Y_pred).abs().sum().item() / self.val_dt
         mae = (Y - Y_pred).abs().mean().item()
 
-        if self._e % 500 == 0 and self._log_to_wandb:
-            data = [[x,h1,h2,h3,h4] for x,h1,h2,h3,h4 in zip(
-                X.squeeze().cpu().detach().numpy(),
-                Y_pred[:,0].squeeze().cpu().detach().numpy(),
-                Y_pred[:,1].squeeze().cpu().detach().numpy(),
-                Y_pred[:,2].squeeze().cpu().detach().numpy(),
-                Y_pred[:,3].squeeze().cpu().detach().numpy(),
-            )]
-            wandb.log({
-                'dynamics': wandb.Table(data=data,
-                                        columns=['t', 'h1', 'h2', 'h3', 'h4'])
-            })
+        # if self._e % 500 == 0 and self._log_to_wandb:
+        #     data = [[x,h1,h2,h3,h4] for x,h1,h2,h3,h4 in zip(
+        #         X.squeeze().cpu().detach().numpy(),
+        #         Y_pred[:,0].squeeze().cpu().detach().numpy(),
+        #         Y_pred[:,1].squeeze().cpu().detach().numpy(),
+        #         # Y_pred[:,2].squeeze().cpu().detach().numpy(),
+        #         # Y_pred[:,3].squeeze().cpu().detach().numpy(),
+        #     )]
+        #     wandb.log({
+        #         'dynamics': wandb.Table(data=data,
+        #                                 columns=['t', 'h1', 'h2', 'h3', 'h4'])
+        #     })
 
         return iae, mae
 

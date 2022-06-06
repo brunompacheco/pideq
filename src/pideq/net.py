@@ -30,7 +30,7 @@ class PINN(nn.Module):
 
         # self.eps = 1e-3  # added to the output, avoids sqrt gradient at 0
 
-        assert y0.shape[0] == n_out
+        # assert y0.shape[0] == n_out
 
         self.y0 = torch.Tensor(y0)
 
