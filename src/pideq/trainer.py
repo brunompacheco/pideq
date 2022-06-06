@@ -390,7 +390,7 @@ class Trainer4T(Trainer):
                  lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  mixed_precision=True, lr_scheduler_params: dict = None,
                  device=None, wandb_project="pideq-4t", wandb_group=None,
-                 logger=None, checkpoint_every=50, random_seed=42):
+                 logger=None, checkpoint_every=50, random_seed=None):
         self._wandb_config = {
             'T': T,
             'y0': y0,
@@ -495,26 +495,40 @@ class Trainer4T(Trainer):
         X_t.requires_grad_()
         X_f.requires_grad_()
         with torch.set_grad_enabled(True):
-            self._optim.zero_grad()
+            def closure():
+                self._optim.zero_grad()
 
-            with self.autocast_if_mp():
-                Y_t_pred = self.net(X_t)
+                with self.autocast_if_mp():
+                    Y_t_pred = self.net(X_t)
 
-                loss_y = self._loss_func(Y_t_pred, Y_t.to(Y_t_pred))
+                    global loss_y
+                    loss_y = self._loss_func(Y_t_pred, Y_t.to(Y_t_pred))
 
-                y_pred = self.net(X_f)
+                    y_pred = self.net(X_f)
 
-                loss_f = self.get_loss_f(y_pred, X_f)
+                    global loss_f
+                    loss_f = self.get_loss_f(y_pred, X_f)
 
-                loss = loss_y + self.lamb * loss_f
+                    loss = loss_y + self.lamb * loss_f
 
-            if self.mixed_precision:
-                self._scaler.scale(loss).backward()
-                self._scaler.step(self._optim)
-                self._scaler.update()
+                    if loss.requires_grad:
+                        if self.mixed_precision:
+                            self._scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
+
+                    return loss
+
+            if self.optimizer == 'LBFGS':
+                self._optim.step(closure)
             else:
-                loss.backward()
-                self._optim.step()
+                loss = closure()
+
+                if self.mixed_precision:
+                    self._scaler.step(self._optim)
+                    self._scaler.update()
+                else:
+                    self._optim.step()
 
             if self.lr_scheduler is not None:
                 self._scheduler.step()
