@@ -36,4 +36,4 @@ class PINN(nn.Module):
         # y = self.fcn(t / self.T) + self.eps
         y = self.fcn(t / self.T)
 
-        return y / 10. + self.y0.to(t)
+        return (y / 100.) + self.y0.to(y)
