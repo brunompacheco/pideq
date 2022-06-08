@@ -480,32 +480,16 @@ class Trainer4T(Trainer):
         return data_to_log, val_score
 
     def get_loss_f(self, y_pred, x):
-        dy_pred = torch.autograd.grad(
-            y_pred.sum(),
-            x,
-            create_graph=True,
-        )[0]
+        dy_i_preds = list()
+        for _ in range(y_pred.shape[-1]):
+            dy_i_preds.append(grad(y_pred[:,-1].sum(), x, create_graph=True)[0])
 
-        ddy_pred = torch.autograd.grad(
-            dy_pred.sum(),
-            x,
-            create_graph=True,
-        )[0]
+        Jy_pred = torch.stack(dy_i_preds, dim=-1).squeeze(1)
 
-        mu = 1.
-        ddy = + mu * (1 - y_pred ** 2) * dy_pred - y_pred
-        ode = ddy_pred - ddy
+        u0_ = self.u0.to(y_pred).repeat(y_pred.shape[0],1)
+        Jy = self.f(y_pred, u0_)
 
-        # dy_i_preds = list()
-        # for _ in range(y_pred.shape[-1]):
-        #     dy_i_preds.append(grad(y_pred[:,-1].sum(), x, create_graph=True)[0])
-
-        # Jy_pred = torch.stack(dy_i_preds, dim=-1).squeeze(1)
-
-        # u0_ = self.u0.to(y_pred).repeat(y_pred.shape[0],1)
-        # Jy = self.f(y_pred, u0_)
-
-        # ode = Jy_pred - Jy
+        ode = Jy_pred - Jy
 
         return self._loss_func(ode, torch.zeros_like(ode))
 
@@ -529,16 +513,8 @@ class Trainer4T(Trainer):
                 with self.autocast_if_mp():
                     y_t_pred = self.net(X_t)
 
-                    dy_t_pred = torch.autograd.grad(
-                        y_t_pred.sum(),
-                        X_t,
-                        create_graph=True,
-                    )[0]
-
-                    Y_t_pred = torch.stack([y_t_pred, dy_t_pred], dim=-1).squeeze(1)
-
                     global loss_y
-                    loss_y = self._loss_func(Y_t_pred, Y_t.to(Y_t_pred))
+                    loss_y = self._loss_func(y_t_pred, Y_t.to(y_t_pred))
 
                     y_pred = self.net(X_f)
 
@@ -576,21 +552,12 @@ class Trainer4T(Trainer):
 
         X, Y = self.val_data
 
-        X.requires_grad_()
-        with torch.set_grad_enabled(True):
+        with torch.set_grad_enabled(False):
             self._optim.zero_grad()
             y_pred = self.net(X)
 
-        dy_pred = torch.autograd.grad(
-            y_pred.sum(),
-            X,
-            create_graph=False,
-        )[0]
-
-        Y_pred = torch.stack([y_pred, dy_pred], dim=-1).squeeze(1)
-
-        iae = (Y - Y_pred).abs().sum().item() / self.val_dt
-        mae = (Y - Y_pred).abs().mean().item()
+        iae = (Y - y_pred).abs().sum().item() / self.val_dt
+        mae = (Y - y_pred).abs().mean().item()
 
         # if self._e % 500 == 0 and self._log_to_wandb:
         #     data = [[x,h1,h2,h3,h4] for x,h1,h2,h3,h4 in zip(
