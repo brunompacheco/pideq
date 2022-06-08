@@ -8,7 +8,7 @@ from pideq.deq.solvers import forward_iteration
 
 class PINN(nn.Module):
     def __init__(self, T: float, n_in=1, n_out=4,
-                 y0=np.array([12.6, 13.0, 4.8, 4.9]), Nonlin=nn.Tanh,
+                 y0=np.array([0., .1]), Nonlin=nn.Tanh,
                  n_hidden=5, n_nodes=20) -> None:
         super().__init__()
 
