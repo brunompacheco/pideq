@@ -481,8 +481,8 @@ class Trainer4T(Trainer):
 
     def get_loss_f(self, y_pred, x):
         dy_i_preds = list()
-        for _ in range(y_pred.shape[-1]):
-            dy_i_preds.append(grad(y_pred[:,-1].sum(), x, create_graph=True)[0])
+        for i in range(y_pred.shape[-1]):
+            dy_i_preds.append(grad(y_pred[:,i].sum(), x, create_graph=True)[0])
 
         Jy_pred = torch.stack(dy_i_preds, dim=-1).squeeze(1)
 
