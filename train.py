@@ -13,30 +13,13 @@ if __name__ == '__main__':
     T = 10.
 
     # torch.autograd.set_detect_anomaly(True)
-    for _ in range(5):
+    for _ in range(1):
         net = PINN(T, n_out=2, n_hidden=4, n_nodes=20).to(device)
         # net = load_from_wandb(net, '1mez9f3f')
         Trainer4T(
             net,
-            lr=1e-3,
-            epochs=100000,
-            T=T,
-            val_dt=.1,
-            # optimizer='LBFGS',
-            # wandb_project=None,
-            wandb_group='test-vdp',
-            # lr_scheduler='CosineAnnealingLR',
-            # lr_scheduler_params={'T_max': 200, 'eta_min': 1e-3},
-            mixed_precision=True,
-            # loss_func='L1Loss',
-        ).run()
-    for _ in range(5):
-        net = PINN(T, n_out=2, n_hidden=4, n_nodes=100).to(device)
-        # net = load_from_wandb(net, '1mez9f3f')
-        Trainer4T(
-            net,
-            lr=1e-3,
-            epochs=100000,
+            lr=1e-2,
+            epochs=1000000,
             T=T,
             val_dt=.01,
             # optimizer='LBFGS',

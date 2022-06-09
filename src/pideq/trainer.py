@@ -399,7 +399,7 @@ class Trainer4T(Trainer):
                  lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  mixed_precision=True, lr_scheduler_params: dict = None,
                  device=None, wandb_project="pideq-4t", wandb_group=None,
-                 logger=None, checkpoint_every=50, random_seed=None):
+                 logger=None, checkpoint_every=1000, random_seed=None):
         self._wandb_config = {
             'T': T,
             'y0': y0,
