@@ -73,6 +73,8 @@ class Trainer(ABC):
         self.lr_scheduler = lr_scheduler
         self.lr_scheduler_params = lr_scheduler_params
 
+        self._dtype = next(self.net.parameters()).dtype
+
         self.mixed_precision = mixed_precision
 
         if logger is None:
@@ -426,7 +428,7 @@ class Trainer4T(Trainer):
     def prepare_data(self):
         X = torch.rand(self.Nf,1) * self.T
 
-        self.data = X.to(self.device)
+        self.data = X.to(self.device).type(self._dtype)
 
         if self.val_data is None:
             K = int(0.5 + self.T / self.val_dt)
@@ -437,8 +439,8 @@ class Trainer4T(Trainer):
                            method='rk4')
 
             self.val_data = (
-                X_val.to(self.device).unsqueeze(-1),
-                Y_val.to(self.device).squeeze()
+                X_val.to(self.device).type(self._dtype).unsqueeze(-1),
+                Y_val.to(self.device).type(self._dtype).squeeze()
             )
 
     def _run_epoch(self):
@@ -473,7 +475,7 @@ class Trainer4T(Trainer):
     def get_loss_f(self, y_pred, x):
         dy_i_preds = list()
         for i in range(y_pred.shape[-1]):
-            dy_i_preds.append(grad(y_pred[:,-1].sum(), x, create_graph=True)[0])
+            dy_i_preds.append(grad(y_pred[:,i].sum(), x, create_graph=True)[0])
 
         Jy_pred = torch.stack(dy_i_preds, dim=-1).squeeze(1)
 
@@ -486,8 +488,8 @@ class Trainer4T(Trainer):
         self.net.train()
 
         # boundary
-        X_t = torch.zeros(1,1).to(self.device)
-        Y_t = self.y0.clone().to(self.device)
+        X_t = torch.zeros(1,1).to(self.device).type(self._dtype)
+        Y_t = self.y0.clone().to(self.device).type(self._dtype)
 
         # collocation
         X_f = self.data
@@ -496,7 +498,8 @@ class Trainer4T(Trainer):
         X_f.requires_grad_()
         with torch.set_grad_enabled(True):
             def closure():
-                self._optim.zero_grad()
+                if torch.is_grad_enabled():
+                    self._optim.zero_grad()
 
                 with self.autocast_if_mp():
                     Y_t_pred = self.net(X_t)
@@ -517,7 +520,7 @@ class Trainer4T(Trainer):
                         else:
                             loss.backward()
 
-                    return loss
+                return loss
 
             if self.optimizer == 'LBFGS':
                 self._optim.step(closure)
