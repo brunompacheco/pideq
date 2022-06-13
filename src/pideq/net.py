@@ -2,6 +2,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from pideq.deq.model import DEQ
+from pideq.deq.solvers import forward_iteration
+
 
 class PINN(nn.Module):
     def __init__(self, T: float, n_in=1, n_out=4,
@@ -37,3 +40,22 @@ class PINN(nn.Module):
         y = self.fcn(t / self.T)
 
         return (y / 100.) + self.y0.to(y)
+
+class PIDEQ(DEQ):
+    def __init__(self, T: float, y0=np.array([12.6, 13.0, 4.8, 4.9]), n_in=1,
+                 n_out=4, n_states=20, nonlin=torch.tanh,
+                 solver=forward_iteration,
+                 solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
+        super().__init__(n_in, n_out, n_states, nonlin, solver, solver_kwargs)
+
+        self.T = T
+
+        assert y0.shape[0] == n_out
+
+        self.y0 = torch.Tensor(y0)
+
+    def forward(self, t):
+        # rescaling the input => better convergence
+        y, jac_loss = super().forward(t / self.T)
+
+        return (y / 100.) + self.y0.to(y), jac_loss
