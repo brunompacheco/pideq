@@ -14,6 +14,7 @@ import wandb
 from torchdiffeq import odeint
 from torch.cuda.amp import autocast, GradScaler
 from torch.autograd import grad
+from pideq.deq.model import DEQ
 
 from pideq.four_tanks import four_tanks
 
@@ -547,6 +548,138 @@ class Trainer4T(Trainer):
         with torch.set_grad_enabled(True):
             self._optim.zero_grad()
             Y_pred = self.net(X)
+
+        iae = (Y - Y_pred).abs().sum().item() / self.val_dt
+        mae = (Y - Y_pred).abs().mean().item()
+
+        if self._e % 500 == 0 and self._log_to_wandb:
+            data = [[x,h1,h2,h3,h4] for x,h1,h2,h3,h4 in zip(
+                X.squeeze().cpu().detach().numpy(),
+                Y_pred[:,0].squeeze().cpu().detach().numpy(),
+                Y_pred[:,1].squeeze().cpu().detach().numpy(),
+                Y_pred[:,2].squeeze().cpu().detach().numpy(),
+                Y_pred[:,3].squeeze().cpu().detach().numpy(),
+            )]
+            wandb.log({
+                'dynamics': wandb.Table(data=data,
+                                        columns=['t', 'h1', 'h2', 'h3', 'h4'])
+            })
+
+        return iae, mae
+
+class DEQTrainer4T(Trainer4T):
+    def __init__(self, net: DEQ, y0=np.array([12.6, 13, 4.8, 4.9]),
+                 u0=np.array([3.15, 3.15]), Nf=100000, T=200, val_dt=1,
+                 epochs=5, lr=0.1, optimizer: str = 'Adam',
+                 optimizer_params: dict = None, lamb=0.1, jac_lamb=1.,
+                 loss_func: str = 'MSELoss', lr_scheduler: str = None,
+                 mixed_precision=True, lr_scheduler_params: dict = None,
+                 device=None, wandb_project="pideq-4t", wandb_group=None,
+                 logger=None, checkpoint_every=50, random_seed=None):
+        super().__init__(net, y0, u0, Nf, T, val_dt, epochs, lr, optimizer,
+                         optimizer_params, lamb, loss_func, lr_scheduler,
+                         mixed_precision, lr_scheduler_params, device,
+                         wandb_project, wandb_group, logger, checkpoint_every,
+                         random_seed)
+        
+        self.jac_loss_lamb = jac_lamb
+
+    def _run_epoch(self):
+        self.prepare_data()
+
+        # train
+        train_time, (train_loss_y, train_loss_f, train_loss_jac) = timeit(self.train_pass)()
+        train_loss = train_loss_y + self.lamb * train_loss_f + self.jac_loss_lamb * train_loss_jac
+
+        self.l.info(f"Training pass took {train_time:.3f} seconds")
+        self.l.info(f"Training loss = {train_loss}")
+
+        # validation
+        val_time, (iae, mae) = timeit(self.validation_pass)()
+
+        self.l.info(f"Validation pass took {val_time:.3f} seconds")
+        self.l.info(f"IAE = {iae}")
+        self.l.info(f"MAE = {mae}")
+
+        data_to_log = {
+            "train_loss": train_loss,
+            "train_loss_y": train_loss_y,
+            "train_loss_f": train_loss_f,
+            "train_loss_jac": train_loss_jac,
+            "iae": iae,
+            "mae": mae,
+        }
+
+        val_score = mae  # defines best model
+
+        return data_to_log, val_score
+
+    def train_pass(self):
+        self.net.train()
+
+        # boundary
+        X_t = torch.zeros(1,1).to(self.device).type(self._dtype)
+        Y_t = self.y0.clone().to(self.device).type(self._dtype)
+
+        # collocation
+        X_f = self.data
+
+        X_t.requires_grad_()
+        X_f.requires_grad_()
+        with torch.set_grad_enabled(True):
+            def closure():
+                if torch.is_grad_enabled():
+                    self._optim.zero_grad()
+
+                with self.autocast_if_mp():
+                    Y_t_pred, jac_loss_t = self.net(X_t)
+
+                    global loss_y
+                    loss_y = self._loss_func(Y_t_pred, Y_t.to(Y_t_pred))
+
+                    y_pred, jac_loss_f = self.net(X_f)
+
+                    global loss_f
+                    loss_f = self.get_loss_f(y_pred, X_f)
+
+                    global jac_loss
+                    jac_loss = (jac_loss_t + jac_loss_f) / 2
+
+                    loss = loss_y + self.lamb * loss_f + self.jac_loss_lamb * jac_loss
+
+                    if loss.requires_grad:
+                        if self.mixed_precision:
+                            self._scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
+
+                return loss
+
+            if self.optimizer == 'LBFGS':
+                self._optim.step(closure)
+            else:
+                loss = closure()
+
+                if self.mixed_precision:
+                    self._scaler.step(self._optim)
+                    self._scaler.update()
+                else:
+                    self._optim.step()
+
+            if self.lr_scheduler is not None:
+                self._scheduler.step()
+
+        return loss_y.item(), loss_f.item(), jac_loss.item()
+
+    def validation_pass(self):
+        self.net.eval()
+
+        X, Y = self.val_data
+
+        X.requires_grad_()
+        with torch.set_grad_enabled(True):
+            self._optim.zero_grad()
+            Y_pred, _ = self.net(X)
 
         iae = (Y - Y_pred).abs().sum().item() / self.val_dt
         mae = (Y - Y_pred).abs().mean().item()
