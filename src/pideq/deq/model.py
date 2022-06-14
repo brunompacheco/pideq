@@ -8,16 +8,18 @@ from pideq.deq.solvers import forward_iteration, anderson
 
 
 class DEQ(nn.Module):
-    def __init__(self, n_in=1, n_out=1, n_states=2, nonlin=torch.tanh, solver=forward_iteration, solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
+    def __init__(self, n_in=1, n_out=1, n_states=2, nonlin=torch.tanh,
+                 solver=forward_iteration,
+                 solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
         super().__init__()
 
-        A = .1 * (torch.rand(n_states,n_in) * 2 * np.sqrt(n_in) - np.sqrt(n_in))
+        A = .01 * (torch.rand(n_states,n_in) * 2 * np.sqrt(n_in) - np.sqrt(n_in))
         self.A = nn.Parameter(A, requires_grad=True)
 
-        B = .1 * (torch.rand(n_states,n_states) * 2 * np.sqrt(n_states) - np.sqrt(n_states))
+        B = .01 * (torch.rand(n_states,n_states) * 2 * np.sqrt(n_states) - np.sqrt(n_states))
         self.B = nn.Parameter(B, requires_grad=True)
 
-        b = .1 * (torch.rand(n_states) * 2 * np.sqrt(n_states) - np.sqrt(n_states))
+        b = .01 * (torch.rand(n_states) * 2 * np.sqrt(n_states) - np.sqrt(n_states))
         self.b = nn.Parameter(b, requires_grad=True)
 
         self.h = nn.Linear(n_states, n_out)
@@ -71,7 +73,6 @@ class DEQ(nn.Module):
 
         self.get_eq = GetEq()
 
-
     def forward(self, x):
         z0 = torch.zeros(x.shape[0], self.n_states).to(x)
         z_star = self.get_eq.apply(x, z0, self.A, self.B, self.b)
@@ -98,7 +99,8 @@ if __name__ == '__main__':
     z0 = torch.zeros(x.shape[0], n_states).double()
     z0.requires_grad_()
 
-    deq = DEQ(n_in, n_out, n_states, solver_kwargs={'threshold': 1000, 'eps': 1e-7})
+    deq = DEQ(n_in, n_out, n_states,
+              solver_kwargs={'threshold': 1000, 'eps': 1e-7})
     deq = deq.double()
 
     torch.autograd.gradcheck(
