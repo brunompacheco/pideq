@@ -19,15 +19,16 @@ if __name__ == '__main__':
         # net = net.double()
         # torch.backends.cuda.matmul.allow_tf32 = False
         DEQTrainer4T(
-            PIDEQ(T, n_out=4, n_states=20),
-            lr=1e-3,
-            epochs=1000,
+            PIDEQ(T, n_out=4, n_states=100),
+            lr=1e-4,
+            epochs=100000,
             T=T,
             val_dt=.01,
             # optimizer='LBFGS',
             # optimizer_params={'max_iter': 1, 'max_eval': 2000},
             # wandb_project=None,
             wandb_group=f'test-deq',
+            jac_lamb=0.1,
             # lr_scheduler='ExponentialLR',
             # lr_scheduler_params={'gamma': 0.99},
             # lr_scheduler='CosineAnnealingLR',
