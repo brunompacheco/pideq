@@ -398,7 +398,7 @@ class Trainer4T(Trainer):
                  lr=0.1, optimizer: str = 'Adam', optimizer_params: dict = None,
                  lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  mixed_precision=True, lr_scheduler_params: dict = None,
-                 device=None, wandb_project="pideq-4t", wandb_group=None,
+                 device=None, wandb_project="pideq-vdp", wandb_group=None,
                  logger=None, checkpoint_every=1000, random_seed=None):
         self._wandb_config = {
             'T': T,
@@ -556,7 +556,7 @@ class Trainer4T(Trainer):
             self._optim.zero_grad()
             y_pred = self.net(X)
 
-        iae = (Y - y_pred).abs().sum().item() / self.val_dt
+        iae = (Y - y_pred).abs().sum().item() * self.val_dt
         mae = (Y - y_pred).abs().mean().item()
 
         # if self._e % 500 == 0 and self._log_to_wandb:
@@ -581,7 +581,7 @@ class DEQTrainer4T(Trainer4T):
                  optimizer_params: dict = None, lamb=0.1, jac_lamb=1.,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  mixed_precision=True, lr_scheduler_params: dict = None,
-                 device=None, wandb_project="pideq-4t", wandb_group=None,
+                 device=None, wandb_project="pideq-vdp", wandb_group=None,
                  logger=None, checkpoint_every=50, random_seed=None):
         super().__init__(net, y0, u0, Nf, T, val_dt, epochs, lr, optimizer,
                          optimizer_params, lamb, loss_func, lr_scheduler,
@@ -688,7 +688,7 @@ class DEQTrainer4T(Trainer4T):
             self._optim.zero_grad()
             Y_pred, _ = self.net(X)
 
-        iae = (Y - Y_pred).abs().sum().item() / self.val_dt
+        iae = (Y - Y_pred).abs().sum().item() * self.val_dt
         mae = (Y - Y_pred).abs().mean().item()
 
         if self._e % 500 == 0 and self._log_to_wandb:
