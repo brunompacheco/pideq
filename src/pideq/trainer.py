@@ -575,8 +575,8 @@ class Trainer4T(Trainer):
         return iae, mae
 
 class DEQTrainer4T(Trainer4T):
-    def __init__(self, net: DEQ, y0=np.array([12.6, 13, 4.8, 4.9]),
-                 u0=np.array([3.15, 3.15]), Nf=100000, T=200, val_dt=1,
+    def __init__(self, net: DEQ, y0=np.array([0., .1]),
+                 u0=np.array([0.]), Nf=100000, T=200, val_dt=1,
                  epochs=5, lr=0.1, optimizer: str = 'Adam',
                  optimizer_params: dict = None, lamb=0.1, jac_lamb=1.,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
@@ -691,17 +691,17 @@ class DEQTrainer4T(Trainer4T):
         iae = (Y - Y_pred).abs().sum().item() * self.val_dt
         mae = (Y - Y_pred).abs().mean().item()
 
-        if self._e % 500 == 0 and self._log_to_wandb:
-            data = [[x,h1,h2,h3,h4] for x,h1,h2,h3,h4 in zip(
-                X.squeeze().cpu().detach().numpy(),
-                Y_pred[:,0].squeeze().cpu().detach().numpy(),
-                Y_pred[:,1].squeeze().cpu().detach().numpy(),
-                Y_pred[:,2].squeeze().cpu().detach().numpy(),
-                Y_pred[:,3].squeeze().cpu().detach().numpy(),
-            )]
-            wandb.log({
-                'dynamics': wandb.Table(data=data,
-                                        columns=['t', 'h1', 'h2', 'h3', 'h4'])
-            })
+        # if self._e % 500 == 0 and self._log_to_wandb:
+        #     data = [[x,h1,h2,h3,h4] for x,h1,h2,h3,h4 in zip(
+        #         X.squeeze().cpu().detach().numpy(),
+        #         Y_pred[:,0].squeeze().cpu().detach().numpy(),
+        #         Y_pred[:,1].squeeze().cpu().detach().numpy(),
+        #         Y_pred[:,2].squeeze().cpu().detach().numpy(),
+        #         Y_pred[:,3].squeeze().cpu().detach().numpy(),
+        #     )]
+        #     wandb.log({
+        #         'dynamics': wandb.Table(data=data,
+        #                                 columns=['t', 'h1', 'h2', 'h3', 'h4'])
+        #     })
 
         return iae, mae

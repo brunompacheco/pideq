@@ -42,9 +42,8 @@ class PINN(nn.Module):
         return (y / 100.) + self.y0.to(y)
 
 class PIDEQ(DEQ):
-    def __init__(self, T: float, y0=np.array([12.6, 13.0, 4.8, 4.9]), n_in=1,
-                 n_out=4, n_states=20, nonlin=torch.tanh,
-                 solver=forward_iteration,
+    def __init__(self, T: float, y0=np.array([0., .1]), n_in=1, n_out=2,
+                 n_states=20, nonlin=torch.tanh, solver=forward_iteration,
                  solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
         super().__init__(n_in, n_out, n_states, nonlin, solver, solver_kwargs)
 
