@@ -43,9 +43,10 @@ class PINN(nn.Module):
 
 class PIDEQ(DEQ):
     def __init__(self, T: float, y0=np.array([0., .1]), n_in=1, n_out=2,
-                 n_states=20, nonlin=torch.tanh, solver=forward_iteration,
+                 n_states=20, nonlin=torch.tanh, always_compute_grad=False,
+                 solver=forward_iteration,
                  solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
-        super().__init__(n_in, n_out, n_states, nonlin, solver, solver_kwargs)
+        super().__init__(n_in, n_out, n_states, nonlin, always_compute_grad, solver, solver_kwargs)
 
         self.T = T
 
@@ -55,6 +56,14 @@ class PIDEQ(DEQ):
 
     def forward(self, t):
         # rescaling the input => better convergence
-        y, jac_loss = super().forward(t / self.T)
+        if self.training:
+            y_, jac_loss = super().forward(t / self.T)
+        else:
+            y_ = super().forward(t / self.T)
 
-        return (y / 100.) + self.y0.to(y), jac_loss
+        y = (y_ / 100.) + self.y0.to(y_)
+
+        if self.training:
+            return y, jac_loss
+        else:
+            return y

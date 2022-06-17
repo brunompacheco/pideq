@@ -686,7 +686,7 @@ class DEQTrainer4T(Trainer4T):
         X.requires_grad_()
         with torch.set_grad_enabled(True):
             self._optim.zero_grad()
-            Y_pred, _ = self.net(X)
+            Y_pred = self.net(X)
 
         iae = (Y - Y_pred).abs().sum().item() * self.val_dt
         mae = (Y - Y_pred).abs().mean().item()
