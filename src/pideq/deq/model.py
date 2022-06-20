@@ -91,22 +91,24 @@ class DEQ(nn.Module):
 
         self.n_states = n_states
 
-        self.A = nn.Linear(n_in,n_states)
         self.B = nn.Linear(n_states,n_states)
+        self.A = nn.Linear(n_in,n_states)
+
+        self.nonlin = nonlin
 
         # decreasing initial weights to increase stability
-        self.weight = nn.Parameter(0.1 * self.A.weight)
-        self.weight = nn.Parameter(0.1 * self.B.weight)
-
-        self.f = lambda x,z: nonlin(self.A(x) + self.B(z))
+        self.A.weight = nn.Parameter(0.1 * self.A.weight)
+        self.B.weight = nn.Parameter(0.1 * self.B.weight)
 
         self.solver = solver
         self.solver_kwargs = solver_kwargs
 
         self.always_compute_grad = always_compute_grad
 
-        # self.h = nn.Linear(n_states, n_out)
-        self.h = lambda z: z[...,:n_out]
+        self.h = nn.Linear(n_states, n_out)
+
+    def f(self, x, z):
+        return self.nonlin(self.A(x) + self.B(z))
 
     def forward(self, x: torch.Tensor):
         z0 = torch.zeros(x.shape[0], self.n_states).type(x.dtype).to(x.device)
