@@ -1,3 +1,5 @@
+import sys
+
 import wandb
 
 import torch
@@ -14,3 +16,11 @@ def load_from_wandb(net: nn.Module, run_id: str,
     net.load_state_dict(torch.load(best_model_file.name))
 
     return net
+
+def debugger_is_active() -> bool:
+    """Return if the debugger is currently active.
+
+    From https://stackoverflow.com/a/67065084
+    """
+    gettrace = getattr(sys, 'gettrace', lambda : None) 
+    return gettrace() is not None
