@@ -56,8 +56,7 @@ class PIDEQ(DEQ):
 
     def forward(self, t):
         # rescaling the input => better convergence
-        # t_ = t / self.T
-        t_ = t
+        t_ = t / self.T
 
         if self.training:
             y_, jac_loss = super().forward(t_)
