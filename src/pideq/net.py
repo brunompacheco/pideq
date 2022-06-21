@@ -46,11 +46,11 @@ class PIDEQ(DEQ):
                  n_states=20, nonlin=torch.tanh, always_compute_grad=False,
                  solver=anderson, solver_kwargs={'threshold': 200, 'eps':1e-3}
                 ) -> None:
-        super().__init__(n_in, n_out, n_states, nonlin, always_compute_grad, solver, solver_kwargs)
+        super().__init__(n_in, n_out // 2, n_states, nonlin, always_compute_grad, solver, solver_kwargs)
 
         self.T = T
 
-        # assert y0.shape[0] == n_out
+        assert y0.shape[0] == n_out
 
         self.y0 = torch.Tensor(y0)
 
@@ -60,12 +60,22 @@ class PIDEQ(DEQ):
 
         if self.training:
             y_, jac_loss = super().forward(t_)
+            create_graph = True
         else:
             y_ = super().forward(t_)
+            create_graph = False
 
         y = y_ + self.y0.to(y_)[0]
 
+        dy = torch.autograd.grad(
+            y.sum(),
+            t,
+            create_graph=create_graph,
+        )[0]
+
+        Y = torch.stack([y, dy], dim=-1).squeeze(1)
+
         if self.training:
-            return y, jac_loss
+            return Y, jac_loss
         else:
-            return y
+            return Y

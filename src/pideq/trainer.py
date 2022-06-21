@@ -480,9 +480,13 @@ class Trainer4T(Trainer):
         return data_to_log, val_score
 
     def get_loss_f(self, y_pred, x):
-        dy_i_preds = list()
-        for i in range(y_pred.shape[-1]):
-            dy_i_preds.append(grad(y_pred[:,i].sum(), x, create_graph=True)[0])
+        # dy_i_preds = list()
+        # for i in range(y_pred.shape[-1]):
+        #     dy_i_preds.append(grad(y_pred[:,i].sum(), x, create_graph=True)[0])
+        dy_i_preds = [
+            y_pred[:,1:],
+            grad(y_pred[:,1].sum(), x, create_graph=True)[0],
+        ]
 
         Jy_pred = torch.stack(dy_i_preds, dim=-1).squeeze(1)
 
@@ -639,40 +643,32 @@ class DEQTrainer4T(Trainer4T):
                     self._optim.zero_grad()
 
                 with self.autocast_if_mp():
-                    y_t_pred, jac_loss_t = self.net(X_t)
-
-                    dy_t_pred = torch.autograd.grad(
-                        y_t_pred.sum(),
-                        X_t,
-                        create_graph=True,
-                    )[0]
-
-                    Y_t_pred = torch.stack([y_t_pred, dy_t_pred], dim=-1).squeeze(1)
+                    Y_t_pred, jac_loss_t = self.net(X_t)
 
                     global loss_y
                     loss_y = self._loss_func(Y_t_pred, Y_t.to(Y_t_pred))
 
                     y_pred, jac_loss_f = self.net(X_f)
 
-                    dy_pred = torch.autograd.grad(
-                        y_pred.sum(),
-                        X_f,
-                        create_graph=True,
-                    )[0]
+                    # dy_pred = torch.autograd.grad(
+                    #     y_pred.sum(),
+                    #     X_f,
+                    #     create_graph=True,
+                    # )[0]
 
-                    ddy_pred = torch.autograd.grad(
-                        dy_pred.sum(),
-                        X_f,
-                        create_graph=True,
-                    )[0]
+                    # ddy_pred = torch.autograd.grad(
+                    #     dy_pred.sum(),
+                    #     X_f,
+                    #     create_graph=True,
+                    # )[0]
 
-                    mu = 1.
-                    ddy = + mu * (1 - y_pred ** 2) * dy_pred - y_pred
-                    ode = ddy_pred - ddy
+                    # mu = 1.
+                    # ddy = + mu * (1 - y_pred ** 2) * dy_pred - y_pred
+                    # ode = ddy_pred - ddy
 
                     global loss_f
-                    # loss_f = self.get_loss_f(y_pred, X_f)
-                    loss_f = self._loss_func(ode, torch.zeros_like(ode))
+                    loss_f = self.get_loss_f(y_pred, X_f)
+                    # loss_f = self._loss_func(ode, torch.zeros_like(ode))
 
                     global jac_loss
                     # jac_loss = (jac_loss_t + jac_loss_f) / 2
@@ -712,15 +708,7 @@ class DEQTrainer4T(Trainer4T):
         X.requires_grad_()
         with torch.set_grad_enabled(True):
             self._optim.zero_grad()
-            y_pred = self.net(X)
-
-        dy_pred = torch.autograd.grad(
-            y_pred.sum(),
-            X,
-            create_graph=True,
-        )[0]
-
-        Y_pred = torch.stack([y_pred, dy_pred], dim=-1).squeeze(1)
+            Y_pred = self.net(X)
 
         iae = (Y - Y_pred).abs().sum().item() * self.val_dt
         mae = (Y - Y_pred).abs().mean().item()
