@@ -200,10 +200,7 @@ class Trainer(ABC):
             self._scheduler = Scheduler(self._optim, **self.lr_scheduler_params)
 
         if self._log_to_wandb:
-            if not hasattr(self, '_wandb_config'):
-                self._wandb_config = dict()
-
-            for k, v in {
+            self._add_to_wandb_config({
                 "learning_rate": self.lr,
                 "epochs": self.epochs,
                 "model": type(self.net).__name__,
@@ -214,8 +211,7 @@ class Trainer(ABC):
                 "loss_func": self.loss_func,
                 "random_seed": self.random_seed,
                 "device": self.device,
-            }.items():
-                self._wandb_config[k] = v
+            })
 
             self.l.info('Initializing wandb.')
             self.initialize_wandb()
@@ -232,6 +228,13 @@ class Trainer(ABC):
         self.prepare_data()
 
         self._is_initalized = True
+
+    def _add_to_wandb_config(self, d: dict):
+        if not hasattr(self, '_wandb_config'):
+            self._wandb_config = dict()
+
+        for k, v in d.items():
+            self._wandb_config[k] = v
 
     def initialize_wandb(self):
         wandb.init(
@@ -391,7 +394,7 @@ class Trainer(ABC):
 
         return fpath
 
-class Trainer4T(Trainer):
+class PINNTrainer(Trainer):
     """Trainer for the 4 Tank system."""
     def __init__(self, net: nn.Module, y0=np.array([0., .1]),
                  u0=np.array([0.]), Nf=1e5, T=200, val_dt=1., epochs=5,
@@ -400,11 +403,11 @@ class Trainer4T(Trainer):
                  mixed_precision=True, lr_scheduler_params: dict = None,
                  device=None, wandb_project="pideq-vdp", wandb_group=None,
                  logger=None, checkpoint_every=1000, random_seed=None):
-        self._wandb_config = {
+        self._add_to_wandb_config({
             'T': T,
             'y0': y0,
             'u0': u0,
-        }
+        })
 
         super().__init__(net, epochs, lr, optimizer, optimizer_params,
                          loss_func, lr_scheduler, lr_scheduler_params,
@@ -578,7 +581,7 @@ class Trainer4T(Trainer):
 
         return iae, mae
 
-class DEQTrainer4T(Trainer4T):
+class PIDEQTrainer(PINNTrainer):
     def __init__(self, net: DEQ, y0=np.array([0., .1]),
                  u0=np.array([0.]), Nf=100000, T=200, val_dt=1,
                  epochs=5, lr=0.1, optimizer: str = 'Adam',
