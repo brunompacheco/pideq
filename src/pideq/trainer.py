@@ -590,12 +590,19 @@ class PIDEQTrainer(PINNTrainer):
                  mixed_precision=True, lr_scheduler_params: dict = None,
                  device=None, wandb_project="pideq-vdp", wandb_group=None,
                  logger=None, checkpoint_every=50, random_seed=None):
+        self._add_to_wandb_config({
+            'n_states': net.n_states,
+            'solver_max_nfe': net.solver_kwargs['threshold'],
+            'solver_eps': net.solver_kwargs['eps'],
+            'solver': net.solver.__name__,
+        })
+
         super().__init__(net, y0, u0, Nf, T, val_dt, epochs, lr, optimizer,
                          optimizer_params, lamb, loss_func, lr_scheduler,
                          mixed_precision, lr_scheduler_params, device,
                          wandb_project, wandb_group, logger, checkpoint_every,
                          random_seed)
-        
+
         self.jac_loss_lamb = jac_lamb
 
     def _run_epoch(self):
