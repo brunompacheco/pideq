@@ -255,25 +255,39 @@ class Trainer(ABC):
         """Must populate `self.data` and `self.val_data`.
         """
 
+    @staticmethod
+    def _add_data_to_log(data: dict, prefix: str, data_to_log=dict()):
+        for k, v in data.items():
+            if k != 'all':
+                data_to_log[prefix+k] = v
+        
+        return data_to_log
+
     def _run_epoch(self):
         # train
-        train_time, train_loss = timeit(self.train_pass)()
+        train_time, (train_losses, train_times) = timeit(self.train_pass)()
 
         self.l.info(f"Training pass took {train_time:.3f} seconds")
-        self.l.info(f"Training loss = {train_loss}")
+        self.l.info(f"Training loss = {train_losses['all']}")
 
         # validation
-        val_time, val_loss = timeit(self.validation_pass)()
+        val_time, (val_losses, val_times) = timeit(self.validation_pass)()
 
         self.l.info(f"Validation pass took {val_time:.3f} seconds")
-        self.l.info(f"Validation loss = {val_loss}")
+        self.l.info(f"Validation loss = {val_losses['all']}")
 
         data_to_log = {
-            "train_loss": train_loss,
-            "val_loss": val_loss,
+            "train_loss": train_losses['all'],
+            "val_loss": val_losses['all'],
+            "train_time": train_time,
+            "val_time": val_time,
         }
+        self._add_data_to_log(train_losses, 'train_loss_', data_to_log)
+        self._add_data_to_log(val_losses, 'val_loss_', data_to_log)
+        self._add_data_to_log(train_times, 'train_time_', data_to_log)
+        self._add_data_to_log(val_times, 'val_time_', data_to_log)
 
-        val_score = val_loss  # defines best model
+        val_score = val_losses['all']  # defines best model
 
         return data_to_log, val_score
 
@@ -319,6 +333,11 @@ class Trainer(ABC):
 
     def train_pass(self):
         train_loss = 0
+
+        forward_time = 0
+        loss_time = 0
+        backward_time = 0
+
         self.net.train()
         with torch.set_grad_enabled(True):
             for X, y in self.data:
@@ -328,17 +347,20 @@ class Trainer(ABC):
                 self._optim.zero_grad()
 
                 with self.autocast_if_mp():
-                    y_hat = self.net(X)
+                    forward_time_, y_hat = timeit(self.net)(X)
+                    forward_time += forward_time_
 
-                    loss = self._loss_func(y_hat, y)
+                    loss_time_, loss = timeit(self._loss_func)(y_hat, y)
+                    loss_time += loss_time_
 
                 if self.mixed_precision:
-                    self._scaler.scale(loss).backward()
+                    backward_time_, _  = timeit(self._scaler.scale(loss).backward)()
                     self._scaler.step(self._optim)
                     self._scaler.update()
                 else:
-                    loss.backwad()
+                    backward_time_, _  = timeit(loss.backwad)()
                     self._optim.step()
+                backward_time += backward_time_
 
                 train_loss += loss.item() * len(y)
 
@@ -348,10 +370,22 @@ class Trainer(ABC):
         # scale to data size
         train_loss = train_loss / len(self.data)
 
-        return train_loss
+        losses = {
+            'all': train_loss,
+        }
+        times = {
+            'forward': forward_time,
+            'loss': loss_time,
+            'backward': backward_time,
+        }
+
+        return losses, times
 
     def validation_pass(self):
         val_loss = 0
+
+        forward_time = 0
+        loss_time = 0
 
         self.net.eval()
         with torch.set_grad_enabled(False):
@@ -360,16 +394,26 @@ class Trainer(ABC):
                 y = y.to(self.device)
 
                 with self.autocast_if_mp():
-                    y_hat = self.net(X)
-                    loss_value = self._loss_func(y_hat, y).item()
+                    forward_time_, y_hat = timeit(self.net)(X)
+                    forward_time += forward_time_
 
-                val_loss += loss_value * len(y)  # scales to data size
+                    loss_time_, loss = timeit(self._loss_func)(y_hat, y)
+                    loss_time += loss_time_
+
+                val_loss += loss.item() * len(y)  # scales to data size
 
         # scale to data size
         len_data = len(self.val_data)
         val_loss = val_loss / len_data
+        losses = {
+            'all': val_loss
+        }
+        times = {
+            'forward': forward_time,
+            'loss': loss_time,
+        }
 
-        return val_loss
+        return losses, times
 
     def save_checkpoint(self):
         checkpoint = {
@@ -456,31 +500,7 @@ class PINNTrainer(Trainer):
     def _run_epoch(self):
         self.prepare_data()
 
-        # train
-        train_time, (train_loss_y, train_loss_f) = timeit(self.train_pass)()
-        train_loss = train_loss_y + self.lamb * train_loss_f
-
-        self.l.info(f"Training pass took {train_time:.3f} seconds")
-        self.l.info(f"Training loss = {train_loss}")
-
-        # validation
-        val_time, (iae, mae) = timeit(self.validation_pass)()
-
-        self.l.info(f"Validation pass took {val_time:.3f} seconds")
-        self.l.info(f"IAE = {iae}")
-        self.l.info(f"MAE = {mae}")
-
-        data_to_log = {
-            "train_loss": train_loss,
-            "train_loss_y": train_loss_y,
-            "train_loss_f": train_loss_f,
-            "iae": iae,
-            "mae": mae,
-        }
-
-        val_score = mae  # defines best model
-
-        return data_to_log, val_score
+        return super()._run_epoch()
 
     def get_loss_f(self, y_pred, x):
         dy_i_preds = list()
@@ -523,25 +543,29 @@ class PINNTrainer(Trainer):
                     global loss_y
                     loss_y = self._loss_func(y_t_pred, Y_t.to(y_t_pred))
 
-                    y_pred = self.net(X_f)
+                    global forward_time
+                    forward_time, y_pred = timeit(self.net)(X_f)
 
-                    global loss_f
-                    loss_f = self.get_loss_f(y_pred, X_f)
+                    global loss_f, loss_time
+                    loss_time, loss_f = timeit(self.get_loss_f)(y_pred, X_f)
 
+                    global loss
                     loss = loss_y + self.lamb * loss_f
 
                     if loss.requires_grad:
+                        global backward_time
+
                         if self.mixed_precision:
-                            self._scaler.scale(loss).backward()
+                            backward_time, _ = timeit(self._scaler.scale(loss).backward)()
                         else:
-                            loss.backward()
+                            backward_time, _ = timeit(loss.backward)()
 
                 return loss
 
             if self.optimizer == 'LBFGS':
                 self._optim.step(closure)
             else:
-                loss = closure()
+                closure()
 
                 if self.mixed_precision:
                     self._scaler.step(self._optim)
@@ -552,7 +576,17 @@ class PINNTrainer(Trainer):
             if self.lr_scheduler is not None:
                 self._scheduler.step()
 
-        return loss_y.item(), loss_f.item()
+        losses = {
+            'all': loss.item(),
+            'y': loss_y.item(),
+            'f': loss_f.item(),
+        }
+        times = {
+            'forward': forward_time,
+            'loss': loss_time,
+            'backward': backward_time,
+        }
+        return losses, times
 
     def validation_pass(self):
         self.net.eval()
@@ -561,25 +595,21 @@ class PINNTrainer(Trainer):
 
         with torch.set_grad_enabled(False):
             self._optim.zero_grad()
-            y_pred = self.net(X)
+            forward_time, y_pred = timeit(self.net)(X)
 
         iae = (Y - y_pred).abs().sum().item() * self.val_dt
         mae = (Y - y_pred).abs().mean().item()
 
-        # if self._e % 500 == 0 and self._log_to_wandb:
-        #     data = [[x,h1,h2,h3,h4] for x,h1,h2,h3,h4 in zip(
-        #         X.squeeze().cpu().detach().numpy(),
-        #         Y_pred[:,0].squeeze().cpu().detach().numpy(),
-        #         Y_pred[:,1].squeeze().cpu().detach().numpy(),
-        #         # Y_pred[:,2].squeeze().cpu().detach().numpy(),
-        #         # Y_pred[:,3].squeeze().cpu().detach().numpy(),
-        #     )]
-        #     wandb.log({
-        #         'dynamics': wandb.Table(data=data,
-        #                                 columns=['t', 'h1', 'h2', 'h3', 'h4'])
-        #     })
+        losses = {
+            'all': iae,
+            'iae': iae,
+            'mae': mae,
+        }
+        times = {
+            'forward': forward_time,
+        }
 
-        return iae, mae
+        return losses, times
 
 class PIDEQTrainer(PINNTrainer):
     def __init__(self, net: DEQ, y0=np.array([0., .1]),
@@ -605,36 +635,6 @@ class PIDEQTrainer(PINNTrainer):
 
         self.jac_loss_lamb = jac_lamb
 
-    def _run_epoch(self):
-        self.prepare_data()
-
-        # train
-        train_time, (train_loss_y, train_loss_f, train_loss_jac) = timeit(self.train_pass)()
-        train_loss = train_loss_y + self.lamb * train_loss_f + self.jac_loss_lamb * train_loss_jac
-
-        self.l.info(f"Training pass took {train_time:.3f} seconds")
-        self.l.info(f"Training loss = {train_loss}")
-
-        # validation
-        val_time, (iae, mae) = timeit(self.validation_pass)()
-
-        self.l.info(f"Validation pass took {val_time:.3f} seconds")
-        self.l.info(f"IAE = {iae}")
-        self.l.info(f"MAE = {mae}")
-
-        data_to_log = {
-            "train_loss": train_loss,
-            "train_loss_y": train_loss_y,
-            "train_loss_f": train_loss_f,
-            "train_loss_jac": train_loss_jac,
-            "iae": iae,
-            "mae": mae,
-        }
-
-        val_score = mae  # defines best model
-
-        return data_to_log, val_score
-
     def train_pass(self):
         self.net.train()
 
@@ -658,7 +658,8 @@ class PIDEQTrainer(PINNTrainer):
                     global loss_y
                     loss_y = self._loss_func(Y_t_pred, Y_t.to(Y_t_pred))
 
-                    y_pred, jac_loss_f = self.net(X_f)
+                    global forward_time
+                    forward_time, (y_pred, jac_loss_f) = timeit(self.net)(X_f)
 
                     # dy_pred = torch.autograd.grad(
                     #     y_pred.sum(),
@@ -676,28 +677,31 @@ class PIDEQTrainer(PINNTrainer):
                     # ddy = + mu * (1 - y_pred ** 2) * dy_pred - y_pred
                     # ode = ddy_pred - ddy
 
-                    global loss_f
-                    loss_f = self.get_loss_f(y_pred, X_f)
+                    global loss_f, loss_time
+                    loss_time, loss_f = timeit(self.get_loss_f)(y_pred, X_f)
                     # loss_f = self._loss_func(ode, torch.zeros_like(ode))
 
                     global jac_loss
                     # jac_loss = (jac_loss_t + jac_loss_f) / 2
                     jac_loss = jac_loss_t + jac_loss_f
 
+                    global loss
                     loss = loss_y + self.lamb * loss_f + self.jac_loss_lamb * jac_loss
 
                     if loss.requires_grad:
+                        global backward_time
+
                         if self.mixed_precision:
-                            self._scaler.scale(loss).backward()
+                            backward_time, _ = timeit(self._scaler.scale(loss).backward)()
                         else:
-                            loss.backward()
+                            backward_time, _ = timeit(loss.backward)()
 
                 return loss
 
             if self.optimizer == 'LBFGS':
                 self._optim.step(closure)
             else:
-                loss = closure()
+                closure()
 
                 if self.mixed_precision:
                     self._scaler.step(self._optim)
@@ -708,32 +712,15 @@ class PIDEQTrainer(PINNTrainer):
             if self.lr_scheduler is not None:
                 self._scheduler.step()
 
-        return loss_y.item(), loss_f.item(), jac_loss.item()
-
-    def validation_pass(self):
-        self.net.eval()
-
-        X, Y = self.val_data
-
-        X.requires_grad_()
-        with torch.set_grad_enabled(True):
-            self._optim.zero_grad()
-            Y_pred = self.net(X)
-
-        iae = (Y - Y_pred).abs().sum().item() * self.val_dt
-        mae = (Y - Y_pred).abs().mean().item()
-
-        # if self._e % 500 == 0 and self._log_to_wandb:
-        #     data = [[x,h1,h2,h3,h4] for x,h1,h2,h3,h4 in zip(
-        #         X.squeeze().cpu().detach().numpy(),
-        #         Y_pred[:,0].squeeze().cpu().detach().numpy(),
-        #         Y_pred[:,1].squeeze().cpu().detach().numpy(),
-        #         Y_pred[:,2].squeeze().cpu().detach().numpy(),
-        #         Y_pred[:,3].squeeze().cpu().detach().numpy(),
-        #     )]
-        #     wandb.log({
-        #         'dynamics': wandb.Table(data=data,
-        #                                 columns=['t', 'h1', 'h2', 'h3', 'h4'])
-        #     })
-
-        return iae, mae
+        losses = {
+            'all': loss.item(),
+            'y': loss_y.item(),
+            'f': loss_f.item(),
+            'jac': jac_loss.item(),
+        }
+        times = {
+            'forward': forward_time,
+            'loss': loss_time,
+            'backward': backward_time,
+        }
+        return losses, times
