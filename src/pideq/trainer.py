@@ -17,6 +17,7 @@ from torch.autograd import grad
 from pideq.deq.model import DEQ
 
 from pideq.four_tanks import four_tanks
+from pideq.net import PINN
 
 
 def f(y, u, mu=1.):
@@ -439,12 +440,12 @@ class Trainer(ABC):
         return fpath
 
 class PINNTrainer(Trainer):
-    """Trainer for the 4 Tank system."""
-    def __init__(self, net: nn.Module, y0=np.array([0., .1]),
-                 u0=np.array([0.]), Nf=1e5, T=200, val_dt=1., epochs=5,
-                 lr=0.1, optimizer: str = 'Adam', optimizer_params: dict = None,
+    """Trainer for the Van der Pol oscillator using a Physics-Informed NN."""
+    def __init__(self, net: PINN, y0=np.array([0., .1]),
+                 u0=np.array([0.]), Nf=1e5, T=2, val_dt=.002, epochs=5,
+                 lr=1e-3, optimizer: str = 'Adam', optimizer_params: dict = None,
                  lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
-                 mixed_precision=True, lr_scheduler_params: dict = None,
+                 mixed_precision=False, lr_scheduler_params: dict = None,
                  device=None, wandb_project="pideq-vdp", wandb_group=None,
                  logger=None, checkpoint_every=1000, random_seed=None):
         self._add_to_wandb_config({
@@ -613,13 +614,13 @@ class PINNTrainer(Trainer):
 
 class PIDEQTrainer(PINNTrainer):
     def __init__(self, net: DEQ, y0=np.array([0., .1]),
-                 u0=np.array([0.]), Nf=100000, T=200, val_dt=1,
-                 epochs=5, lr=0.1, optimizer: str = 'Adam',
+                 u0=np.array([0.]), Nf=100000, T=2, val_dt=.002,
+                 epochs=5, lr=1e-3, optimizer: str = 'Adam',
                  optimizer_params: dict = None, lamb=0.1, jac_lamb=1.,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
-                 mixed_precision=True, lr_scheduler_params: dict = None,
+                 mixed_precision=False, lr_scheduler_params: dict = None,
                  device=None, wandb_project="pideq-vdp", wandb_group=None,
-                 logger=None, checkpoint_every=50, random_seed=None):
+                 logger=None, checkpoint_every=1000, random_seed=None):
         self._add_to_wandb_config({
             'n_states': net.n_states,
             'solver_max_nfe': net.solver_kwargs['threshold'],
@@ -661,6 +662,9 @@ class PIDEQTrainer(PINNTrainer):
                     global forward_time
                     forward_time, (y_pred, jac_loss_f) = timeit(self.net)(X_f)
 
+                    global forward_nfe
+                    forward_nfe = self.net.latest_nfe
+
                     # dy_pred = torch.autograd.grad(
                     #     y_pred.sum(),
                     #     X_f,
@@ -680,6 +684,9 @@ class PIDEQTrainer(PINNTrainer):
                     global loss_f, loss_time
                     loss_time, loss_f = timeit(self.get_loss_f)(y_pred, X_f)
                     # loss_f = self._loss_func(ode, torch.zeros_like(ode))
+
+                    global backward_nfe
+                    backward_nfe = self.net.latest_backward_nfe
 
                     global jac_loss
                     # jac_loss = (jac_loss_t + jac_loss_f) / 2
@@ -717,10 +724,20 @@ class PIDEQTrainer(PINNTrainer):
             'y': loss_y.item(),
             'f': loss_f.item(),
             'jac': jac_loss.item(),
+            'fwd_nfe': forward_nfe,
+            'bwd_nfe': backward_nfe,
         }
         times = {
             'forward': forward_time,
             'loss': loss_time,
             'backward': backward_time,
         }
+        return losses, times
+
+    def validation_pass(self):
+        losses, times = super().validation_pass()
+
+        losses['fwd_nfe'] = self.net.latest_nfe
+        losses['bwd_nfe'] = self.net.latest_backward_nfe
+
         return losses, times

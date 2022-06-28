@@ -115,11 +115,13 @@ class DEQ(nn.Module):
 
         # compute forward pass
         with torch.no_grad():
-            z_star_ = self.solver(
+            solver_out = self.solver(
                 lambda z : self.f(x, z),
                 z0,
                 **self.solver_kwargs
-            )['result']
+            )
+            z_star_ = solver_out['result']
+            self.latest_nfe = solver_out['nstep']
         z_star = self.f(x, z_star_)
 
         # (Prepare for) Backward pass, see step 3 above
@@ -141,11 +143,13 @@ class DEQ(nn.Module):
 
                 # Compute the fixed point of yJ + grad, where J=J_f is the Jacobian of f at z_star
                 # forward iteration is the only solver through which I could backprop (tested with gradgradcheck)
-                new_grad = forward_iteration(
+                backward_solver_out = forward_iteration(
                     lambda y: torch.autograd.grad(f_, z_, y, retain_graph=True)[0] + grad,
                     torch.zeros_like(grad),
                     **self.solver_kwargs
-                )['result']
+                )
+                new_grad = backward_solver_out['result']
+                self.latest_backward_nfe = backward_solver_out['nstep']
 
                 return new_grad
 
