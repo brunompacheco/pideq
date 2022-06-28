@@ -1,22 +1,33 @@
 import torch
 
-from pideq.net import PINN
-from pideq.trainer import Trainer4T
+from pideq.net import PIDEQ, PINN
+from pideq.trainer import PIDEQTrainer, PINNTrainer
 
 
 if __name__ == '__main__':
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # Experiment 1
-    # Baseline FCN for different time horizons
-    for T, epochs in [(2, 1e4), (5, 1e5), (10, 3e5)]:
+    # 1: Baseline PINN
+    for _ in range(5):
+        PINNTrainer(
+            PINN(2., n_nodes=20).to(device),
+            epochs=5e4,
+            wandb_group=f'PINN-baseline',
+        ).run()
+
+    # 2: PIDEQ Baseline
+    for _ in range(5):
+        PIDEQTrainer(
+            PIDEQ(2., n_states=80),
+            epochs=5e4,
+            wandb_group=f'PIDEQ-baseline',
+        )
+
+    # 3: PIDEQ #States
+    for n_states in [40, 20, 10, 5]:
         for _ in range(5):
-            Trainer4T(
-                PINN(T, n_nodes=20).to(device),
-                lr=1e-3 if T <= 5 else 1e-2,
-                epochs=epochs,
-                T=T,
-                val_dt=T/1000,
-                wandb_group=f'FCN-baseline-T={T}',
-                mixed_precision=False,
-            ).run()
+            PIDEQTrainer(
+                PIDEQ(2., n_states=n_states),
+                epochs=5e4,
+                wandb_group=f'PIDEQ-#z={n_states}',
+            )
