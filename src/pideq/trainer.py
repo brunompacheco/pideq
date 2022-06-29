@@ -623,6 +623,7 @@ class PIDEQTrainer(PINNTrainer):
                  logger=None, checkpoint_every=1000, random_seed=None):
         self._add_to_wandb_config({
             'n_states': net.n_states,
+            'n_hidden': net.n_hidden,
             'solver_max_nfe': net.solver_kwargs['threshold'],
             'solver_eps': net.solver_kwargs['eps'],
             'solver': net.solver.__name__,

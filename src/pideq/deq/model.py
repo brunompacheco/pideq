@@ -84,17 +84,31 @@ from pideq.deq.solvers import forward_iteration, anderson
 #         return y, jac_loss_estimate(f(x,z_star), z_star)
 
 class DEQ(nn.Module):
-    def __init__(self, n_in=1, n_out=1, n_states=20, nonlin=torch.tanh,
-                 always_compute_grad=False, solver=anderson,
+    def __init__(self, n_in=1, n_out=1, n_states=20, n_hidden=0,
+                 nonlin=torch.tanh, always_compute_grad=False, solver=anderson,
                  solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
         super().__init__()
 
         self.n_states = n_states
+        self.n_hidden = n_hidden
 
         self.B = nn.Linear(n_states,n_states)
         self.A = nn.Linear(n_in,n_states)
 
         self.nonlin = nonlin
+
+        if self.n_hidden > 0:
+            hidden_layers = list()
+            for _ in range(n_hidden):
+                linear = nn.Linear(n_states, n_states)
+                linear.weight = nn.Parameter(0.1 * linear.weight)
+                hidden_layers += [
+                    linear,
+                    nn.Tanh(),  # TODO refactor nonlin
+                ]
+            self.hidden = nn.Sequential(*hidden_layers)
+        else:
+            self.hidden = lambda x: x
 
         # decreasing initial weights to increase stability
         self.A.weight = nn.Parameter(0.1 * self.A.weight)
@@ -108,7 +122,10 @@ class DEQ(nn.Module):
         self.h = nn.Linear(n_states, n_out)
 
     def f(self, x, z):
-        return self.nonlin(self.A(x) + self.B(z))
+        y = self.nonlin(self.A(x) + self.B(z))
+
+        return self.hidden(y)
+
 
     def forward(self, x: torch.Tensor):
         z0 = torch.zeros(x.shape[0], self.n_states).type(x.dtype).to(x.device)
@@ -137,9 +154,19 @@ class DEQ(nn.Module):
 
             # new_z_start already has the df/d(*) hook, but the J_g^-1 must be added mannually
             def backward_hook(grad):
+                # the following is necessary to add breakpoints here
+                # import pydevd
+                # pydevd.settrace(suspend=False, trace_only_current_thread=True)
+
                 if self.hook is not None:
                     self.hook.remove()
                     torch.cuda.synchronize()   # To avoid infinite recursion
+
+                # this fixes a bug that happens every now and then, that the
+                # backwards graph of f_ disappears in the second call of this
+                # hook during loss.backward()
+                with torch.enable_grad():
+                    f_ = self.f(x, z_)
 
                 # Compute the fixed point of yJ + grad, where J=J_f is the Jacobian of f at z_star
                 # forward iteration is the only solver through which I could backprop (tested with gradgradcheck)

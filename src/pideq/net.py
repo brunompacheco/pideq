@@ -43,10 +43,10 @@ class PINN(nn.Module):
 
 class PIDEQ(DEQ):
     def __init__(self, T: float, y0=np.array([0., .1]), n_in=1, n_out=2,
-                 n_states=20, nonlin=torch.tanh, always_compute_grad=False,
+                 n_states=20, n_hidden=0, nonlin=torch.tanh, always_compute_grad=False,
                  solver=anderson, solver_kwargs={'threshold': 200, 'eps':1e-4}
                 ) -> None:
-        super().__init__(n_in, n_out, n_states, nonlin, always_compute_grad, solver, solver_kwargs)
+        super().__init__(n_in, n_out, n_states, n_hidden, nonlin, always_compute_grad, solver, solver_kwargs)
 
         self.T = T
 
