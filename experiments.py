@@ -1,5 +1,6 @@
 import click
 import torch
+from pideq.deq.solvers import anderson, broyden, forward_iteration
 
 from pideq.net import PINN, PIDEQ
 from pideq.trainer import PINNTrainer, PIDEQTrainer
@@ -21,7 +22,7 @@ def experiment_2():
         wandb_group=f'PIDEQ-baseline',
     ).run()
 
-def experiment_3(ns_states=[40, 20, 10, 5]):
+def experiment_3(ns_states=[40, 20, 10, 5, 2,]):
     print('=== EXPERIMENT 3 ===')
     for n_states in ns_states:
         PIDEQTrainer(
@@ -29,6 +30,53 @@ def experiment_3(ns_states=[40, 20, 10, 5]):
             epochs=5e4,
             wandb_group=f'PIDEQ-#z={n_states}',
         ).run()
+
+def experiment_4(ns_hidden=[1, 2,]):
+    print('=== EXPERIMENT 4 ===')
+    for n_hidden in ns_hidden:
+        PIDEQTrainer(
+            PIDEQ(2., n_states=5, n_hidden=n_hidden),
+            epochs=5e4,
+            wandb_group=f'PIDEQ-#hidden={n_hidden}',
+        ).run()
+
+def experiment_5(jac_lambdas=[1., .1]):
+    print('=== EXPERIMENT 5 ===')
+    for jac_lambda in jac_lambdas:
+        PIDEQTrainer(
+            PIDEQ(2., n_states=5),
+            epochs=5e4,
+            jac_lamb=jac_lambda,
+            wandb_group=f'PIDEQ-#jac_lamb={jac_lambda}',
+        ).run()
+
+def experiment_6(solvers=[broyden, forward_iteration]):
+    print('=== EXPERIMENT 6 ===')
+    for solver in solvers:
+        PIDEQTrainer(
+            PIDEQ(2., n_states=5, solver=solver),
+            epochs=5e4,
+            wandb_group=f'PIDEQ-#solver={solver.__name__}',
+        ).run()
+
+def experiment_7(epss=[1e-2, 1e-6]):
+    print('=== EXPERIMENT 7 ===')
+    for eps in epss:
+        PIDEQTrainer(
+            PIDEQ(2., n_states=5, solver_kwargs={'threshold': 200, 'eps': eps}),
+            epochs=5e4,
+            wandb_group=f'PIDEQ-#eps={eps:.0e}',
+        ).run()
+
+def experiment_8():
+    print('=== EXPERIMENT 8 ===')
+    PIDEQTrainer(
+        PIDEQ(2., n_states=5),
+        epochs=5e4,
+        lr_scheduler='MultiStepLR',
+        lr_scheduler_params={'milestones': [30000, 40000]},
+        wandb_group=f'PIDEQ-#step_decay',
+    ).run()
 
 @click.command()
 @click.option('-n', '--n-runs', default=1, show_default=True, type=click.INT,
