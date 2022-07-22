@@ -1,3 +1,4 @@
+from time import time
 from turtle import forward
 import numpy as np
 import torch
@@ -150,7 +151,9 @@ class DEQ(nn.Module):
 
             # Jacobian-related computations, see additional step above. For instance:
             if self.training:
+                start_time = time()
                 jac_loss = jac_loss_estimate(f_, z_, vecs=1)
+                self.jac_loss_time = time() - start_time
 
             # new_z_start already has the df/d(*) hook, but the J_g^-1 must be added mannually
             def backward_hook(grad):

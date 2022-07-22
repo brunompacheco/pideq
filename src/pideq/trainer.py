@@ -662,6 +662,7 @@ class PIDEQTrainer(PINNTrainer):
 
                     global forward_time
                     forward_time, (y_pred, jac_loss_f) = timeit(self.net)(X_f)
+                    forward_time -= self.net.jac_loss_time
 
                     global forward_nfe
                     forward_nfe = self.net.latest_nfe
@@ -684,6 +685,7 @@ class PIDEQTrainer(PINNTrainer):
 
                     global loss_f, loss_time
                     loss_time, loss_f = timeit(self.get_loss_f)(y_pred, X_f)
+                    loss_time += self.net.jac_loss_time
                     # loss_f = self._loss_func(ode, torch.zeros_like(ode))
 
                     global backward_nfe
