@@ -40,7 +40,7 @@ def experiment_4(ns_hidden=[1, 2,]):
             wandb_group=f'PIDEQ-#hidden={n_hidden}',
         ).run()
 
-def experiment_5(jac_lambdas=[1., .1]):
+def experiment_5(jac_lambdas=[0.1, 2]):
     print('=== EXPERIMENT 5 ===')
     for jac_lambda in jac_lambdas:
         PIDEQTrainer(
@@ -50,7 +50,7 @@ def experiment_5(jac_lambdas=[1., .1]):
             wandb_group=f'PIDEQ-#jac_lamb={jac_lambda}',
         ).run()
 
-def experiment_6(solvers=[broyden, forward_iteration]):
+def experiment_6(solvers=[forward_iteration, broyden]):
     print('=== EXPERIMENT 6 ===')
     for solver in solvers:
         PIDEQTrainer(
@@ -63,7 +63,7 @@ def experiment_7(epss=[1e-2, 1e-6]):
     print('=== EXPERIMENT 7 ===')
     for eps in epss:
         PIDEQTrainer(
-            PIDEQ(2., n_states=5, solver_kwargs={'threshold': 200, 'eps': eps}),
+            PIDEQ(2., n_states=5, solver=forward_iteration, solver_kwargs={'threshold': 200, 'eps': eps}),
             epochs=5e4,
             wandb_group=f'PIDEQ-#eps={eps:.0e}',
         ).run()
@@ -71,11 +71,19 @@ def experiment_7(epss=[1e-2, 1e-6]):
 def experiment_8():
     print('=== EXPERIMENT 8 ===')
     PIDEQTrainer(
-        PIDEQ(2., n_states=5),
+        PIDEQ(2., n_states=5, solver=broyden),
         epochs=5e4,
         lr_scheduler='MultiStepLR',
         lr_scheduler_params={'milestones': [30000, 40000]},
         wandb_group=f'PIDEQ-#step_decay',
+    ).run()
+
+def experiment_9():
+    print('=== EXPERIMENT 9 ===')
+    PINNTrainer(
+        PINN(2., n_hidden=2, n_nodes=5),
+        epochs=5e4,
+        wandb_group=f'PINN-baseline-small',
     ).run()
 
 @click.command()
