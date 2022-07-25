@@ -2,7 +2,7 @@
 
 Physics-Informed Deep Equilibrium Models. This means applying the regularization proposed by [Raissi et al. (2019)](#1) to the equilibrium models as described by [Ba et al. (2019)](#2).
 
-PIDEQ is tested on the 4 tanks system.
+PIDEQ is tested on the Van der Pol oscillator.
 
 
 ## References
