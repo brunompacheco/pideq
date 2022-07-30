@@ -7,12 +7,13 @@ from pideq.deq.solvers import anderson, forward_iteration
 
 
 class PINN(nn.Module):
-    def __init__(self, T: float, n_in=1, n_out=2,
-                 y0=np.array([0., .1]), Nonlin=nn.Tanh,
-                 n_hidden=4, n_nodes=20) -> None:
+    def __init__(self, T: float, n_in=1, y0=np.array([12.6, 13.0, 4.8, 4.9]),
+                 Nonlin=nn.Tanh, n_hidden=4, n_nodes=20) -> None:
         super().__init__()
 
         self.T = T
+
+        self.n_out = y0.shape[0]
 
         l = list()
         l.append(nn.Linear(n_in, n_nodes))
@@ -22,15 +23,13 @@ class PINN(nn.Module):
             l.append(nn.Linear(n_nodes, n_nodes))
             l.append(Nonlin())
 
-        l.append(nn.Linear(n_nodes, n_out))
+        l.append(nn.Linear(n_nodes, self.n_out))
 
         # l.append(nn.ReLU())  # avoids negative outputs, which are out-of-bounds
 
         self.fcn = nn.Sequential(*l)
 
         # self.eps = 1e-3  # added to the output, avoids sqrt gradient at 0
-
-        # assert y0.shape[0] == n_out
 
         self.y0 = torch.Tensor(y0)
 
@@ -42,15 +41,15 @@ class PINN(nn.Module):
         return (y / 100.) + self.y0.to(y)
 
 class PIDEQ(DEQ):
-    def __init__(self, T: float, y0=np.array([0., .1]), n_in=1, n_out=2,
+    def __init__(self, T: float, y0=np.array([12.6, 13.0, 4.8, 4.9]), n_in=1,
                  n_states=20, n_hidden=0, nonlin=torch.tanh, always_compute_grad=False,
                  solver=anderson, solver_kwargs={'threshold': 200, 'eps':1e-4}
                 ) -> None:
-        super().__init__(n_in, n_out, n_states, n_hidden, nonlin, always_compute_grad, solver, solver_kwargs)
+        self.n_out = y0.shape[0]
+
+        super().__init__(n_in, self.n_out, n_states, n_hidden, nonlin, always_compute_grad, solver, solver_kwargs)
 
         self.T = T
-
-        assert y0.shape[0] == n_out
 
         self.y0 = torch.Tensor(y0)
 

@@ -441,12 +441,12 @@ class Trainer(ABC):
 
 class PINNTrainer(Trainer):
     """Trainer for the Van der Pol oscillator using a Physics-Informed NN."""
-    def __init__(self, net: PINN, y0=np.array([0., .1]),
-                 u0=np.array([0.]), Nf=1e5, T=2, val_dt=.002, epochs=5,
+    def __init__(self, net: PINN, y0=np.array([12.6, 13.0, 4.8, 4.9]),
+                 u0=np.array([3.15, 3.15]), Nf=1e5, T=2, val_dt=.002, epochs=5,
                  lr=1e-3, optimizer: str = 'Adam', optimizer_params: dict = None,
                  lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  mixed_precision=False, lr_scheduler_params: dict = None,
-                 device=None, wandb_project="pideq-vdp", wandb_group=None,
+                 device=None, wandb_project="pideq-4t", wandb_group=None,
                  logger=None, checkpoint_every=1000, random_seed=None):
         self._add_to_wandb_config({
             'T': T,
@@ -478,7 +478,7 @@ class PINNTrainer(Trainer):
         self.data = None
         self.val_data = None
 
-        self.f = f
+        self.f = four_tanks
 
     def prepare_data(self):
         X = torch.rand(self.Nf,1) * self.T
@@ -613,8 +613,8 @@ class PINNTrainer(Trainer):
         return losses, times
 
 class PIDEQTrainer(PINNTrainer):
-    def __init__(self, net: DEQ, y0=np.array([0., .1]),
-                 u0=np.array([0.]), Nf=100000, T=2, val_dt=.002,
+    def __init__(self, net: DEQ, y0=np.array([12.6, 13.0, 4.8, 4.9]),
+                 u0=np.array([3.15, 3.15]), Nf=100000, T=2, val_dt=.002,
                  epochs=5, lr=1e-3, optimizer: str = 'Adam',
                  optimizer_params: dict = None, lamb=0.1, jac_lamb=1.,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
