@@ -2,7 +2,7 @@
 
 Physics-Informed Deep Equilibrium Models. This means applying the regularization proposed by [Raissi et al. (2019)](#1) to the equilibrium models as described by [Ba et al. (2019)](#2).
 
-PIDEQ is tested on the Van der Pol oscillator.
+PIDEQ is tested on the Van der Pol oscillator. All experiments were tracked using W&B: https://wandb.ai/brunompac/pideq-vdp.
 
 
 ## References
