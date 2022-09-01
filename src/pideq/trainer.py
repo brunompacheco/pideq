@@ -17,7 +17,7 @@ from torch.autograd import grad
 from pideq.deq.model import DEQ
 
 from pideq.four_tanks import four_tanks
-from pideq.net import PINN
+from pideq.net import PINC, PINN
 
 
 def f(y, u, mu=1.):
@@ -441,16 +441,19 @@ class Trainer(ABC):
 
 class PINNTrainer(Trainer):
     """Trainer for the Van der Pol oscillator using a Physics-Informed NN."""
-    def __init__(self, net: PINN, y0=np.array([0., .1]),
-                 u0=np.array([0.]), Nf=1e5, T=2, val_dt=.002, epochs=5,
-                 lr=1e-3, optimizer: str = 'Adam', optimizer_params: dict = None,
-                 lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
+    def __init__(self, net: PINN, u0=np.array([0.]), Nf=1e5, T=2, val_dt=.002,
+                 epochs=5, lr=1e-3, optimizer: str = 'Adam',
+                 optimizer_params: dict = None, lamb=0.1,
+                 loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  mixed_precision=False, lr_scheduler_params: dict = None,
                  device=None, wandb_project="pideq-vdp", wandb_group=None,
                  logger=None, checkpoint_every=1000, random_seed=None):
+        # initial state
+        self.y0 = torch.Tensor(net.y0).view(1,net.y0.shape[0])
+
         self._add_to_wandb_config({
             'T': T,
-            'y0': y0,
+            'y0': self.y0,
             'u0': u0,
         })
 
@@ -459,11 +462,10 @@ class PINNTrainer(Trainer):
                          mixed_precision, device, wandb_project,
                          wandb_group, logger, checkpoint_every, random_seed)
 
+        self.y0 = self.y0.to(self.device)
+
         self.Nf = int(Nf)    # number of collocation points
         self.val_dt = val_dt
-
-        # initial state
-        self.y0 = torch.from_numpy(y0).view(1,y0.shape[0]).to(self.device)
 
         # initial control
         self.u0 = torch.from_numpy(u0).view(1,u0.shape[0]).to(self.device)
@@ -613,8 +615,7 @@ class PINNTrainer(Trainer):
         return losses, times
 
 class PIDEQTrainer(PINNTrainer):
-    def __init__(self, net: DEQ, y0=np.array([0., .1]),
-                 u0=np.array([0.]), Nf=100000, T=2, val_dt=.002,
+    def __init__(self, net: DEQ, u0=np.array([0.]), Nf=100000, T=2, val_dt=.002,
                  epochs=5, lr=1e-3, optimizer: str = 'Adam',
                  optimizer_params: dict = None, lamb=0.1, jac_lamb=1.,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
@@ -629,7 +630,7 @@ class PIDEQTrainer(PINNTrainer):
             'solver': net.solver.__name__,
         })
 
-        super().__init__(net, y0, u0, Nf, T, val_dt, epochs, lr, optimizer,
+        super().__init__(net, u0, Nf, T, val_dt, epochs, lr, optimizer,
                          optimizer_params, lamb, loss_func, lr_scheduler,
                          mixed_precision, lr_scheduler_params, device,
                          wandb_project, wandb_group, logger, checkpoint_every,
@@ -742,5 +743,157 @@ class PIDEQTrainer(PINNTrainer):
 
         losses['fwd_nfe'] = self.net.latest_nfe
         losses['bwd_nfe'] = self.net.latest_backward_nfe
+
+        return losses, times
+
+class PINCTrainer(PINNTrainer):
+    def __init__(self, net: PINC, u0=np.array([0]), u_bounds=np.array([-1, 1]),
+                 Nf=100000, Nt=1000, T=1, val_T=10, val_y0=np.array([0, .1]),
+                 val_dt=0.1, epochs=5, lr=0.001,
+                 optimizer: str = 'Adam', optimizer_params: dict = None,
+                 lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
+                 mixed_precision=False, lr_scheduler_params: dict = None,
+                 device=None, wandb_project="pideqc-vdp", wandb_group=None,
+                 logger=None, checkpoint_every=1000, random_seed=None):
+        self.y_bounds = net.y_bounds
+        self.u_bounds = u_bounds
+
+        self.Nt = Nt
+
+        super().__init__(net, u0, Nf, T, val_dt, epochs, lr, optimizer,
+                         optimizer_params, lamb, loss_func, lr_scheduler,
+                         mixed_precision, lr_scheduler_params, device,
+                         wandb_project, wandb_group, logger, checkpoint_every,
+                         random_seed)
+
+        self.val_T = val_T
+        self.val_y0 = torch.Tensor(val_y0).view(1,val_y0.shape[0]).to(self.device)
+
+    def prepare_data(self):
+        y_range = self.y_bounds[:,1] - self.y_bounds[:,0]
+
+        # data points
+        y0_t = torch.rand(self.Nt, 2) * y_range + self.y_bounds[:,0]
+        t_t = torch.zeros(self.Nt, 1)
+
+        y0_t = y0_t.to(self.device).type(self._dtype)
+        t_t = t_t.to(self.device).type(self._dtype)
+
+        # collocation points
+        y0_f = torch.rand(self.Nf, 2) * y_range + self.y_bounds[0]
+        t_f = torch.rand(self.Nf, 1) * self.T
+
+        y0_f = y0_f.to(self.device).type(self._dtype)
+        t_f = t_f.to(self.device).type(self._dtype)
+
+        self.data = (y0_t, t_t), (y0_f, t_f)
+
+        if self.val_data is None:
+            K = int(0.5 + self.val_T / self.val_dt)
+
+            t_val = torch.Tensor([i * self.val_dt for i in range(K+1)])
+
+            y_val = odeint(lambda t, y: self.f(y,self.u0), self.val_y0, t_val,
+                           method='rk4')
+
+            self.val_data = (
+                t_val.to(self.device).type(self._dtype).unsqueeze(-1),
+                y_val.to(self.device).type(self._dtype).squeeze()
+            )
+
+    def train_pass(self):
+        self.net.train()
+
+        (y0_t, t_t), (y0_f, t_f) = self.data
+
+        t_t.requires_grad_()
+        t_f.requires_grad_()
+        with torch.set_grad_enabled(True):
+            def closure():
+                if torch.is_grad_enabled():
+                    self._optim.zero_grad()
+
+                with self.autocast_if_mp():
+                    y_t_pred = self.net(y0_t, t_t)
+
+                    global loss_y
+                    loss_y = self._loss_func(y_t_pred, y0_t.to(y_t_pred))
+
+                    global forward_time
+                    forward_time, y_pred = timeit(self.net)(y0_f, t_f)
+
+                    global loss_f, loss_time
+                    loss_time, loss_f = timeit(self.get_loss_f)(y_pred, t_f)
+
+                    global loss
+                    loss = loss_y + self.lamb * loss_f
+
+                    if loss.requires_grad:
+                        global backward_time
+
+                        if self.mixed_precision:
+                            backward_time, _ = timeit(self._scaler.scale(loss).backward)()
+                        else:
+                            backward_time, _ = timeit(loss.backward)()
+
+                return loss
+
+            if self.optimizer == 'LBFGS':
+                self._optim.step(closure)
+            else:
+                closure()
+
+                if self.mixed_precision:
+                    self._scaler.step(self._optim)
+                    self._scaler.update()
+                else:
+                    self._optim.step()
+
+            if self.lr_scheduler is not None:
+                self._scheduler.step()
+
+        losses = {
+            'all': loss.item(),
+            'y': loss_y.item(),
+            'f': loss_f.item(),
+        }
+        times = {
+            'forward': forward_time,
+            'loss': loss_time,
+            'backward': backward_time,
+        }
+        return losses, times
+
+    def validation_pass(self):
+        self.net.eval()
+
+        _, y = self.val_data
+
+        t = torch.rand(y.shape[0] - 1, 1) * self.val_dt
+        t = t.to(y)
+
+        with torch.set_grad_enabled(False):
+            self._optim.zero_grad()
+            forward_time, y_pred = timeit(self.net)(y[:-1], t)
+
+            y_preds = list()
+            for y_single in y[:-1]:
+                y_preds.append(self.net(y_single, t[0]))
+            
+        y_pred_selfloop = torch.stack(y_preds)
+        iae_selfloop = (y[1:] - y_pred_selfloop).abs().sum().item() * self.val_dt
+
+        iae = (y[1:] - y_pred).abs().sum().item() * self.val_dt
+        mae = (y[1:] - y_pred).abs().mean().item()
+
+        losses = {
+            'all': iae,
+            'iae': iae,
+            'iae_selfloop': iae_selfloop,
+            'mae': mae,
+        }
+        times = {
+            'forward': forward_time,
+        }
 
         return losses, times

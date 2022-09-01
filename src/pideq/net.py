@@ -41,6 +41,27 @@ class PINN(nn.Module):
 
         return (y / 100.) + self.y0.to(y)
 
+class PINC(PINN):
+    def __init__(self, T: float, n_out=2, y_bounds=np.array([[-3, 3], [-3, 3]]),
+                 Nonlin=nn.Tanh, n_hidden=4, n_nodes=20) -> None:
+        self.y_bounds = y_bounds
+
+        super().__init__(T, self.y_bounds.shape[0] + 1, n_out,
+                         y_bounds.mean(axis=-1), Nonlin, n_hidden, n_nodes)
+    
+    def forward(self, y0, t):
+        # rescaling the input => better convergence
+        t_ = t / self.T
+
+        x = torch.cat([t_, y0], axis=-1)
+
+        y = self.fcn(x)
+
+        y_range = self.y_bounds[:,1] - self.y_bounds[:,0]
+        y_range = torch.from_numpy(y_range)
+
+        return y * y_range.to(y) + self.y0.to(y)
+
 class PIDEQ(DEQ):
     def __init__(self, T: float, y0=np.array([0., .1]), n_in=1, n_out=2,
                  n_states=20, n_hidden=0, nonlin=torch.tanh, always_compute_grad=False,
