@@ -12,6 +12,7 @@ import torch.nn as nn
 import wandb
 
 from torchdiffeq import odeint
+from scipy.integrate import solve_ivp
 from torch.cuda.amp import autocast, GradScaler
 from torch.autograd import grad
 from pideq.deq.model import DEQ
@@ -440,21 +441,19 @@ class Trainer(ABC):
         return fpath
 
 class PINNTrainer(Trainer):
-    """Trainer for the Van der Pol oscillator using a Physics-Informed NN."""
-    def __init__(self, net: PINN, u0=np.array([0.]), Nf=1e5, T=2, val_dt=.002,
+    """Trainer for the NLS using a Physics-Informed NN."""
+    def __init__(self, net: PINN, Nf=1e5, T=2, val_dt=.05,
                  epochs=5, lr=1e-3, optimizer: str = 'Adam',
                  optimizer_params: dict = None, lamb=0.1,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  mixed_precision=False, lr_scheduler_params: dict = None,
-                 device=None, wandb_project="pideq-vdp", wandb_group=None,
+                 device=None, wandb_project="pideq-nls", wandb_group=None,
                  logger=None, checkpoint_every=1000, random_seed=None):
         # initial state
-        self.y0 = torch.Tensor(net.y0).view(1,net.y0.shape[0])
+        self.h0_func = lambda x: 4 / (np.exp(x) + np.exp(-x))
 
         self._add_to_wandb_config({
             'T': T,
-            'y0': self.y0,
-            'u0': u0,
         })
 
         super().__init__(net, epochs, lr, optimizer, optimizer_params,
@@ -462,13 +461,8 @@ class PINNTrainer(Trainer):
                          mixed_precision, device, wandb_project,
                          wandb_group, logger, checkpoint_every, random_seed)
 
-        self.y0 = self.y0.to(self.device)
-
         self.Nf = int(Nf)    # number of collocation points
         self.val_dt = val_dt
-
-        # initial control
-        self.u0 = torch.from_numpy(u0).view(1,u0.shape[0]).to(self.device)
 
         self.T = T
 
@@ -480,24 +474,53 @@ class PINNTrainer(Trainer):
         self.data = None
         self.val_data = None
 
-        self.f = f
-
     def prepare_data(self):
         X = torch.rand(self.Nf,1) * self.T
 
         self.data = X.to(self.device).type(self._dtype)
 
         if self.val_data is None:
-            K = int(0.5 + self.T / self.val_dt)
+            self.l.info(f"Solving NLS through Fourier spectral decomposition")
+            L = 10
+            N = 256 + 1
+            dx = L / (N - 1)
+            x = np.arange(-L/2, L/2 + dx, dx)
 
-            X_val = torch.Tensor([i * self.val_dt for i in range(K+1)])
+            assert len(x) == N
 
-            Y_val = odeint(lambda t, y: self.f(y,self.u0), self.y0, X_val,
-                           method='rk4')
+            # frequencies
+            kappa = 2 * np.pi * np.fft.fftfreq(N, dx)
+
+            # initial conditions
+            h0 = self.h0_func(x)
+            h0 = h0.astype(np.complex64)  # solver in real domain otherwise
+
+            # dh/dt computation using FFT to decompose the space dimension
+            def rhs(t, h):
+                hhat = np.fft.fft(h)
+                hhat_xx = - kappa * kappa * hhat
+
+                h_xx = np.fft.ifft(hhat_xx)
+
+                return 1j * h_xx / 2 + 1j * h * np.abs(h) ** 2
+
+            t = np.arange(0, self.T, self.val_dt)
+
+            ivp = solve_ivp(rhs, (0, self.T), h0, method='RK45', t_eval=t)
+            h = ivp.y.T
+
+            input_mesh = np.dstack(np.meshgrid(x, t)).reshape(-1, 2)
+            t_val = torch.Tensor(input_mesh[:,1])
+            x_val = torch.Tensor(input_mesh[:,0])
+            X_val = (t_val, x_val)
+
+            h = h.flatten()
+            h = np.column_stack((h.real, h.imag))
+            Y_val = torch.Tensor(h)
 
             self.val_data = (
-                X_val.to(self.device).type(self._dtype).unsqueeze(-1),
-                Y_val.to(self.device).type(self._dtype).squeeze()
+                X_val.to(self.device).type(self._dtype),
+                Y_val.to(self.device).type(self._dtype)
             )
 
     def _run_epoch(self):
