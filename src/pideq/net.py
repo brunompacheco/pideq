@@ -7,9 +7,8 @@ from pideq.deq.solvers import anderson, forward_iteration
 
 
 class PINN(nn.Module):
-    def __init__(self, T: float, n_in=1, n_out=2,
-                 y0=np.array([0., .1]), Nonlin=nn.Tanh,
-                 n_hidden=4, n_nodes=20) -> None:
+    def __init__(self, T: float, n_in=2, n_out=2, Nonlin=nn.Tanh,
+                 n_hidden=5, n_nodes=100) -> None:
         super().__init__()
 
         self.T = T
@@ -32,17 +31,19 @@ class PINN(nn.Module):
 
         # assert y0.shape[0] == n_out
 
-        self.y0 = torch.Tensor(y0)
+        # self.y0 = torch.Tensor(y0)
 
-    def forward(self, t):
+    def forward(self, t, x):
         # rescaling the input => better convergence
         # y = self.fcn(t / self.T) + self.eps
-        y = self.fcn(t / self.T)
+        x_ = torch.hstack((t / self.T, x))
 
-        return (y / 100.) + self.y0.to(y)
+        h = self.fcn(x_)
+
+        return h
 
 class PINC(PINN):
-    def __init__(self, T: float, n_out=2, y_bounds=np.array([[-3, 3], [-3, 3]]),
+    def __init__(self, T: float, n_out=2, y_bounds=np.array([[-5, 5], [-5, 5]]),
                  Nonlin=nn.Tanh, n_hidden=4, n_nodes=20) -> None:
         self.y_bounds = y_bounds
 
