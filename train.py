@@ -24,7 +24,7 @@ if __name__ == '__main__':
         wandb_project = None
     else:
         seed = None
-        wandb_project = 'pideqc-vdp'
+        wandb_project = 'pideq-nls'
 
     T = 1.
 
@@ -48,21 +48,29 @@ if __name__ == '__main__':
         #     random_seed=seed,
         # ).run()
 
-        PINCTrainer(
-            PINC(T,),
-            lr=1e-3,
-            epochs=5000,
-            T=T,
-            # optimizer='LBFGS',
-            # optimizer_params={'max_iter': 2000,},
+        # PINCTrainer(
+        #     PINC(T,),
+        #     lr=1e-3,
+        #     epochs=5000,
+        #     T=T,
+        #     # optimizer='LBFGS',
+        #     # optimizer_params={'max_iter': 2000,},
+        #     wandb_project=wandb_project,
+        #     wandb_group='test',
+        #     lr_scheduler='MultiStepLR',
+        #     lr_scheduler_params={'milestones': [500, 1000, 1500, 2000, 2500, 3000]},
+        #     # lr_scheduler='CosineAnnealingLR',
+        #     # lr_scheduler_params={'T_max': 200, 'eta_min': 1e-3},
+        #     mixed_precision=False,
+        #     # loss_func='L1Loss',
+        # ).run()
+
+        PINNTrainer(
+            PINN(T, n_hidden=2, n_nodes=10),
+            Nf=1e3,
             wandb_project=wandb_project,
             wandb_group='test',
-            lr_scheduler='MultiStepLR',
-            lr_scheduler_params={'milestones': [500, 1000, 1500, 2000, 2500, 3000]},
-            # lr_scheduler='CosineAnnealingLR',
-            # lr_scheduler_params={'T_max': 200, 'eta_min': 1e-3},
-            mixed_precision=False,
-            # loss_func='L1Loss',
+            random_seed=seed,
         ).run()
 
         # wandb.alert(

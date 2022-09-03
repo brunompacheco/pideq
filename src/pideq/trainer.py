@@ -293,7 +293,7 @@ class Trainer(ABC):
 
         return data_to_log, val_score
 
-    def run(self):
+    def run(self) -> nn.Module:
         if not self._is_initalized:
             self.setup_training()
 
@@ -332,6 +332,8 @@ class Trainer(ABC):
             wandb.finish()
 
         self.l.info('Training finished!')
+
+        return self.net
 
     def train_pass(self):
         train_loss = 0
@@ -442,7 +444,7 @@ class Trainer(ABC):
 
 class PINNTrainer(Trainer):
     """Trainer for the NLS using a Physics-Informed NN."""
-    def __init__(self, net: PINN, Nf=1e5, T=2, val_dt=.05,
+    def __init__(self, net: PINN, N0=50, Nb=50, Nf=1e5, val_dt=1e-3 * np.pi/2,
                  epochs=5, lr=1e-3, optimizer: str = 'Adam',
                  optimizer_params: dict = None, lamb=0.1,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
@@ -451,9 +453,10 @@ class PINNTrainer(Trainer):
                  logger=None, checkpoint_every=1000, random_seed=None):
         # initial state
         self.h0_func = lambda x: 4 / (np.exp(x) + np.exp(-x))
+        self.h_bounds = (-5, 5)
 
         self._add_to_wandb_config({
-            'T': T,
+            'T': net.T,
         })
 
         super().__init__(net, epochs, lr, optimizer, optimizer_params,
@@ -461,10 +464,12 @@ class PINNTrainer(Trainer):
                          mixed_precision, device, wandb_project,
                          wandb_group, logger, checkpoint_every, random_seed)
 
+        self.N0 = int(N0)    # number of collocation points
+        self.Nb = int(Nb)    # number of collocation points
         self.Nf = int(Nf)    # number of collocation points
-        self.val_dt = val_dt
 
-        self.T = T
+        self.val_dt = val_dt
+        self.T = net.T
 
         if lamb is None:
             self.lamb = 1 / self.Nf
@@ -475,9 +480,26 @@ class PINNTrainer(Trainer):
         self.val_data = None
 
     def prepare_data(self):
-        X = torch.rand(self.Nf,1) * self.T
+        x0 = torch.rand(self.N0,1) * (self.h_bounds[1] - self.h_bounds[0]) + self.h_bounds[0]
+        t0 = torch.zeros_like(x0)
+        X0 = (x0.to(self.device).type(self._dtype), t0.to(self.device).type(self._dtype))
 
-        self.data = X.to(self.device).type(self._dtype)
+        Y0 = self.h0_func(x0)
+        Y0 = torch.hstack((Y0,torch.zeros_like(Y0))).to(self.device).type(self._dtype)
+
+        xb_low = torch.ones(self.Nb,1) * self.h_bounds[0]
+        xb_high = torch.ones(self.Nb,1) * self.h_bounds[1]
+        tb = torch.rand_like(xb_low) * self.T
+        Xb = (
+            (xb_low.to(self.device).type(self._dtype), xb_high.to(self.device).type(self._dtype)),
+            tb.to(self.device).type(self._dtype)
+        )
+
+        xf = torch.rand(self.Nf,1) * (self.h_bounds[1] - self.h_bounds[0]) + self.h_bounds[0]
+        tf = torch.rand(self.Nf,1) * self.T
+        Xf = (xf.to(self.device).type(self._dtype), tf.to(self.device).type(self._dtype))
+
+        self.data = ((X0,Y0), Xb, Xf)
 
         if self.val_data is None:
             self.l.info(f"Solving NLS through Fourier spectral decomposition")
@@ -512,71 +534,96 @@ class PINNTrainer(Trainer):
             input_mesh = np.dstack(np.meshgrid(x, t)).reshape(-1, 2)
             t_val = torch.Tensor(input_mesh[:,1])
             x_val = torch.Tensor(input_mesh[:,0])
-            X_val = (t_val, x_val)
+            X_val = (t_val.to(self.device).type(self._dtype), x_val.to(self.device).type(self._dtype))
 
             h = h.flatten()
             h = np.column_stack((h.real, h.imag))
-            Y_val = torch.Tensor(h)
+            Y_val = torch.Tensor(h).to(self.device).type(self._dtype)
 
-            self.val_data = (
-                X_val.to(self.device).type(self._dtype),
-                Y_val.to(self.device).type(self._dtype)
-            )
+            self.val_data = (X_val, Y_val)
 
-    def _run_epoch(self):
-        self.prepare_data()
+    # def _run_epoch(self):
+    #     self.prepare_data()
 
-        return super()._run_epoch()
+    #     return super()._run_epoch()
 
-    def get_loss_f(self, y_pred, x):
-        dy_i_preds = list()
-        for i in range(y_pred.shape[-1]):
-            dy_i_preds.append(grad(y_pred[:,i].sum(), x, create_graph=True)[0])
-        # dy_i_preds = [
-        #     y_pred[:,1:],
-        #     grad(y_pred[:,1].sum(), x, create_graph=True)[0],
-        # ]
+    def get_jacobian(self, Y, x_):
+        dys = list()
+        for i in range(Y.shape[-1]):
+            dys.append(grad(Y[:,i].sum(), x_, create_graph=True)[0])
+        return torch.stack(dys, dim=-1).squeeze(1)
 
-        Jy_pred = torch.stack(dy_i_preds, dim=-1).squeeze(1)
+    def get_loss_b(self, Yl, Yh, xl, xh):
+        loss = self._loss_func(Yl, Yh)
 
-        u0_ = self.u0.to(y_pred).repeat(y_pred.shape[0],1)
-        Jy = self.f(y_pred, u0_)
+        Jyl = self.get_jacobian(Yl, xl)
+        Jyh = self.get_jacobian(Yh, xh)
 
-        ode = Jy_pred - Jy
+        loss_x = self._loss_func(Jyl, Jyh)
+
+        return loss + loss_x
+
+    def get_loss_f(self, h, x, t):
+        h_t = self.get_jacobian(h, x)
+        h_x = self.get_jacobian(h, x)
+        h_xx = self.get_jacobian(h_x, x)
+
+        u = h[:,0].unsqueeze(-1)  # real part
+        v = h[:,1].unsqueeze(-1)  # imaginary part
+
+        u_t = h_t[:,0].unsqueeze(-1)
+        v_t = h_t[:,1].unsqueeze(-1)
+        u_xx = h_xx[:,0].unsqueeze(-1)
+        v_xx = h_xx[:,1].unsqueeze(-1)
+
+        h_squared = torch.bmm(h.view(h.shape[0],1,h.shape[1]), h.view(h.shape[0],h.shape[1],1)).squeeze(-1)
+
+        ode_real = - v_t + u_xx / 2 + h_squared * u
+        ode_imag = u_t + v_xx / 2 + h_squared * v
+
+        ode = torch.hstack((ode_real, ode_imag))
 
         return self._loss_func(ode, torch.zeros_like(ode))
 
     def train_pass(self):
         self.net.train()
 
-        # boundary
-        X_t = torch.zeros(1,1).to(self.device).type(self._dtype)
-        Y_t = self.y0.clone().to(self.device).type(self._dtype)
+        # training data
+        (X0, Y0), Xb, Xf = self.data
+        x0, t0 = X0
+        (xb_low, xb_high), tb = Xb
+        xf, tf = Xf
 
-        # collocation
-        X_f = self.data
-
-        X_t.requires_grad_()
-        X_f.requires_grad_()
+        xb_low.requires_grad_()
+        xb_high.requires_grad_()
+        tb.requires_grad_()
+        xf.requires_grad_()
+        tf.requires_grad_()
         with torch.set_grad_enabled(True):
             def closure():
                 if torch.is_grad_enabled():
                     self._optim.zero_grad()
 
                 with self.autocast_if_mp():
-                    y_t_pred = self.net(X_t)
+                    Y0_pred = self.net(t0, x0)
 
-                    global loss_y
-                    loss_y = self._loss_func(y_t_pred, Y_t.to(y_t_pred))
+                    global loss_0
+                    loss_0 = self._loss_func(Y0_pred, Y0.to(Y0_pred))
+
+                    Yb_low_pred = self.net(tb, xb_low)
+                    Yb_high_pred = self.net(tb, xb_high)
+
+                    global loss_b
+                    loss_b = self.get_loss_b(Yb_low_pred, Yb_high_pred, xb_low, xb_high)
 
                     global forward_time
-                    forward_time, y_pred = timeit(self.net)(X_f)
+                    forward_time, Yf_pred = timeit(self.net)(tf, xf)
 
                     global loss_f, loss_time
-                    loss_time, loss_f = timeit(self.get_loss_f)(y_pred, X_f)
+                    loss_time, loss_f = timeit(self.get_loss_f)(Yf_pred, xf, tf)
 
                     global loss
-                    loss = loss_y + self.lamb * loss_f
+                    loss = loss_0 + loss_b + loss_f
 
                     if loss.requires_grad:
                         global backward_time
@@ -604,7 +651,8 @@ class PINNTrainer(Trainer):
 
         losses = {
             'all': loss.item(),
-            'y': loss_y.item(),
+            '0': loss_0.item(),
+            'b': loss_b.item(),
             'f': loss_f.item(),
         }
         times = {
@@ -617,11 +665,11 @@ class PINNTrainer(Trainer):
     def validation_pass(self):
         self.net.eval()
 
-        X, Y = self.val_data
+        (t, x), Y = self.val_data
 
         with torch.set_grad_enabled(False):
             self._optim.zero_grad()
-            forward_time, y_pred = timeit(self.net)(X)
+            forward_time, y_pred = timeit(self.net)(t.unsqueeze(-1), x.unsqueeze(-1))
 
         iae = (Y - y_pred).abs().sum().item() * self.val_dt
         mae = (Y - y_pred).abs().mean().item()
