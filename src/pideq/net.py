@@ -8,10 +8,12 @@ from pideq.deq.solvers import anderson, forward_iteration
 
 class PINN(nn.Module):
     def __init__(self, T: float, n_in=2, n_out=2, Nonlin=nn.Tanh,
-                 n_hidden=5, n_nodes=100) -> None:
+                 n_hidden=4, n_nodes=100, xb=[-5, 5]) -> None:
         super().__init__()
 
         self.T = T
+
+        self.xb = np.array(xb)
 
         l = list()
         l.append(nn.Linear(n_in, n_nodes))
@@ -29,7 +31,7 @@ class PINN(nn.Module):
 
         def init_weights(m):
             if isinstance(m, nn.Linear):
-                torch.nn.init.xavier_uniform(m.weight)
+                torch.nn.init.xavier_uniform_(m.weight)
                 m.bias.data.fill_(0.01)
         self.fcn.apply(init_weights)
 
@@ -42,7 +44,10 @@ class PINN(nn.Module):
     def forward(self, t, x):
         # rescaling the input => better convergence
         # y = self.fcn(t / self.T) + self.eps
-        x_ = torch.hstack((t / self.T, x))
+        x_ = torch.hstack((
+            2 * t / self.T - 1,
+            2 * (x - self.xb[0]) / (self.xb[1] - self.xb[0]) - 1
+        ))
 
         h = self.fcn(x_)
 
