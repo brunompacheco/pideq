@@ -27,6 +27,12 @@ class PINN(nn.Module):
 
         self.fcn = nn.Sequential(*l)
 
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                torch.nn.init.xavier_uniform(m.weight)
+                m.bias.data.fill_(0.01)
+        self.fcn.apply(init_weights)
+
         # self.eps = 1e-3  # added to the output, avoids sqrt gradient at 0
 
         # assert y0.shape[0] == n_out
