@@ -444,7 +444,7 @@ class Trainer(ABC):
 
 class PINNTrainer(Trainer):
     """Trainer for the NLS using a Physics-Informed NN."""
-    def __init__(self, net: PINN, N0=50, Nb=50, Nf=1e5, val_dt=1e-3 * np.pi/2,
+    def __init__(self, net: PINN, N0=50, Nb=50, Nf=2e4, val_dt=1e-3 * np.pi/2,
                  epochs=5, lr=1e-3, optimizer: str = 'Adam',
                  optimizer_params: dict = None, lamb=0.1,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
@@ -576,9 +576,10 @@ class PINNTrainer(Trainer):
         u_xx = h_xx[:,0].unsqueeze(-1)
         v_xx = h_xx[:,1].unsqueeze(-1)
 
-        h_squared = torch.bmm(h.view(h.shape[0],1,h.shape[1]), h.view(h.shape[0],h.shape[1],1)).squeeze(-1)
+        # h_squared = torch.bmm(h.view(h.shape[0],1,h.shape[1]), h.view(h.shape[0],h.shape[1],1)).squeeze(-1)
+        h_squared = u**2 + v**2
 
-        ode_real = - v_t + u_xx / 2 + h_squared * u
+        ode_real = v_t - u_xx / 2 - h_squared * u
         ode_imag = u_t + v_xx / 2 + h_squared * v
 
         ode = torch.hstack((ode_real, ode_imag))
@@ -673,11 +674,13 @@ class PINNTrainer(Trainer):
 
         iae = (Y - y_pred).abs().sum().item() * self.val_dt
         mae = (Y - y_pred).abs().mean().item()
+        l2 = torch.sqrt(self._loss_func(y_pred, Y))
 
         losses = {
-            'all': iae,
+            'all': l2,
             'iae': iae,
             'mae': mae,
+            'L2': l2,
         }
         times = {
             'forward': forward_time,
