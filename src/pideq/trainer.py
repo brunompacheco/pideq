@@ -12,7 +12,9 @@ import torch.nn as nn
 import wandb
 
 from torchdiffeq import odeint
+from pyDOE import lhs
 from scipy.integrate import solve_ivp
+from scipy.io import loadmat
 from torch.cuda.amp import autocast, GradScaler
 from torch.autograd import grad
 from pideq.deq.model import DEQ
@@ -480,67 +482,56 @@ class PINNTrainer(Trainer):
         self.val_data = None
 
     def prepare_data(self):
-        x0 = torch.rand(self.N0,1) * (self.h_bounds[1] - self.h_bounds[0]) + self.h_bounds[0]
+        data = loadmat('/mnt/hdd/Downloads/NLS.mat')
+
+        t = data['tt'].flatten()[:,None]
+        x = data['x'].flatten()[:,None]
+        Exact = data['uu']
+        Exact_u = np.real(Exact)
+        Exact_v = np.imag(Exact)
+        Exact_h = np.sqrt(Exact_u**2 + Exact_v**2)
+
+        x_val, t_val = np.meshgrid(x,t)
+        x_val = torch.Tensor(x_val.flatten()[:,None])
+        t_val = torch.Tensor(t_val.flatten()[:,None])
+
+        u_val = Exact_u.T.flatten()[:,None]
+        v_val = Exact_v.T.flatten()[:,None]
+        h_val = Exact_h.T.flatten()[:,None]
+
+        X_val = (t_val.to(self.device).type(self._dtype), x_val.to(self.device).type(self._dtype))
+        Y_val = np.column_stack((u_val, v_val))
+        Y_val = torch.Tensor(Y_val).to(self.device).type(self._dtype)
+
+        self.val_data = (X_val, Y_val)
+
+        idx_x = np.random.choice(x.shape[0], self.N0, replace=False)
+        x0 = torch.Tensor(x[idx_x,:])
         t0 = torch.zeros_like(x0)
         X0 = (x0.to(self.device).type(self._dtype), t0.to(self.device).type(self._dtype))
 
-        Y0 = self.h0_func(x0)
-        Y0 = torch.hstack((Y0,torch.zeros_like(Y0))).to(self.device).type(self._dtype)
+        u0 = Exact_u[idx_x,0:1]
+        v0 = Exact_v[idx_x,0:1]
+        Y0 = torch.Tensor(np.column_stack((u0, v0)))
+        Y0 = torch.Tensor(Y0).to(self.device).type(self._dtype)
 
+        idx_t = np.random.choice(t.shape[0], self.Nb, replace=False)
+        tb = torch.Tensor(t[idx_t,:])
         xb_low = torch.ones(self.Nb,1) * self.h_bounds[0]
         xb_high = torch.ones(self.Nb,1) * self.h_bounds[1]
-        tb = torch.rand_like(xb_low) * self.T
         Xb = (
             (xb_low.to(self.device).type(self._dtype), xb_high.to(self.device).type(self._dtype)),
             tb.to(self.device).type(self._dtype)
         )
 
-        xf = torch.rand(self.Nf,1) * (self.h_bounds[1] - self.h_bounds[0]) + self.h_bounds[0]
-        tf = torch.rand(self.Nf,1) * self.T
+        lb = np.array([-5.0, 0.0])
+        ub = np.array([5.0, np.pi/2])
+        Xf = lb + (ub-lb)*lhs(2, self.Nf)
+        xf = torch.Tensor(Xf[:,0]).unsqueeze(-1)
+        tf = torch.Tensor(Xf[:,1]).unsqueeze(-1)
         Xf = (xf.to(self.device).type(self._dtype), tf.to(self.device).type(self._dtype))
 
         self.data = ((X0,Y0), Xb, Xf)
-
-        if self.val_data is None:
-            self.l.info(f"Solving NLS through Fourier spectral decomposition")
-            L = 10
-            N = 256 + 1
-            dx = L / (N - 1)
-            x = np.arange(-L/2, L/2 + dx, dx)
-
-            assert len(x) == N
-
-            # frequencies
-            kappa = 2 * np.pi * np.fft.fftfreq(N, dx)
-
-            # initial conditions
-            h0 = self.h0_func(x)
-            h0 = h0.astype(np.complex64)  # solver in real domain otherwise
-
-            # dh/dt computation using FFT to decompose the space dimension
-            def rhs(t, h):
-                hhat = np.fft.fft(h)
-                hhat_xx = - kappa * kappa * hhat
-
-                h_xx = np.fft.ifft(hhat_xx)
-
-                return 1j * h_xx / 2 + 1j * h * np.abs(h) ** 2
-
-            t = np.arange(0, self.T, self.val_dt)
-
-            ivp = solve_ivp(rhs, (0, self.T), h0, method='RK45', t_eval=t)
-            h = ivp.y.T
-
-            input_mesh = np.dstack(np.meshgrid(x, t)).reshape(-1, 2)
-            t_val = torch.Tensor(input_mesh[:,1])
-            x_val = torch.Tensor(input_mesh[:,0])
-            X_val = (t_val.to(self.device).type(self._dtype), x_val.to(self.device).type(self._dtype))
-
-            h = h.flatten()
-            h = np.column_stack((h.real, h.imag))
-            Y_val = torch.Tensor(h).to(self.device).type(self._dtype)
-
-            self.val_data = (X_val, Y_val)
 
     # def _run_epoch(self):
     #     self.prepare_data()
@@ -670,16 +661,19 @@ class PINNTrainer(Trainer):
 
         with torch.set_grad_enabled(False):
             self._optim.zero_grad()
-            forward_time, y_pred = timeit(self.net)(t.unsqueeze(-1), x.unsqueeze(-1))
+            forward_time, y_pred = timeit(self.net)(t, x)
 
-        iae = (Y - y_pred).abs().sum().item() * self.val_dt
-        mae = (Y - y_pred).abs().mean().item()
-        l2 = torch.sqrt(self._loss_func(y_pred, Y))
+        val_loss = self._loss_func(y_pred, Y)
+
+        h = torch.sqrt(Y[:,0]**2 + Y[:,1]**2).cpu().numpy()
+        h_pred = torch.sqrt(y_pred[:,0]**2 + y_pred[:,1]**2).cpu().numpy()
+
+        l2 = np.linalg.norm(h - h_pred, 2) / np.linalg.norm(h_pred)
 
         losses = {
-            'all': l2,
-            'iae': iae,
-            'mae': mae,
+            'all': val_loss.item(),
+            # 'iae': iae,
+            # 'mae': mae,
             'L2': l2,
         }
         times = {
