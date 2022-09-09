@@ -20,7 +20,7 @@ from torch.autograd import grad
 from pideq.deq.model import DEQ
 
 from pideq.four_tanks import four_tanks
-from pideq.net import PINC, PINN
+from pideq.net import PIDEQ, PINC, PINN
 
 
 def f(y, u, mu=1.):
@@ -533,11 +533,6 @@ class PINNTrainer(Trainer):
 
         self.data = ((X0,Y0), Xb, Xf)
 
-    # def _run_epoch(self):
-    #     self.prepare_data()
-
-    #     return super()._run_epoch()
-
     def get_jacobian(self, Y, x_):
         dys = list()
         for i in range(Y.shape[-1]):
@@ -683,13 +678,14 @@ class PINNTrainer(Trainer):
         return losses, times
 
 class PIDEQTrainer(PINNTrainer):
-    def __init__(self, net: DEQ, u0=np.array([0.]), Nf=100000, T=2, val_dt=.002,
-                 epochs=5, lr=1e-3, optimizer: str = 'Adam',
-                 optimizer_params: dict = None, lamb=0.1, jac_lamb=1.,
-                 loss_func: str = 'MSELoss', lr_scheduler: str = None,
-                 mixed_precision=False, lr_scheduler_params: dict = None,
-                 device=None, wandb_project="pideq-vdp", wandb_group=None,
-                 logger=None, checkpoint_every=1000, random_seed=None):
+    def __init__(self, net: PIDEQ, N0=50, Nb=50, Nf=20000,
+                 val_dt=0.001 * np.pi / 2, epochs=5, lr=0.001,
+                 optimizer: str = 'Adam', optimizer_params: dict = None,
+                 lamb=0.1, loss_func: str = 'MSELoss',
+                 lr_scheduler: str = None, mixed_precision=False,
+                 lr_scheduler_params: dict = None, device=None,
+                 wandb_project="pideq-nls", wandb_group=None, logger=None,
+                 checkpoint_every=1000, random_seed=None):
         self._add_to_wandb_config({
             'n_states': net.n_states,
             'n_hidden': net.n_hidden,
@@ -698,74 +694,62 @@ class PIDEQTrainer(PINNTrainer):
             'solver': net.solver.__name__,
         })
 
-        super().__init__(net, u0, Nf, T, val_dt, epochs, lr, optimizer,
+        super().__init__(net, N0, Nb, Nf, val_dt, epochs, lr, optimizer,
                          optimizer_params, lamb, loss_func, lr_scheduler,
                          mixed_precision, lr_scheduler_params, device,
                          wandb_project, wandb_group, logger, checkpoint_every,
                          random_seed)
 
-        self.jac_loss_lamb = jac_lamb
-
     def train_pass(self):
         self.net.train()
 
-        # boundary
-        X_t = torch.zeros(1,1).to(self.device).type(self._dtype)
-        Y_t = self.y0.clone().to(self.device).type(self._dtype)
+        # training data
+        (X0, Y0), Xb, Xf = self.data
+        x0, t0 = X0
+        (xb_low, xb_high), tb = Xb
+        xf, tf = Xf
 
-        # collocation
-        X_f = self.data
-
-        X_t.requires_grad_()
-        X_f.requires_grad_()
+        xb_low.requires_grad_()
+        xb_high.requires_grad_()
+        tb.requires_grad_()
+        xf.requires_grad_()
+        tf.requires_grad_()
         with torch.set_grad_enabled(True):
             def closure():
                 if torch.is_grad_enabled():
                     self._optim.zero_grad()
 
                 with self.autocast_if_mp():
-                    Y_t_pred, jac_loss_t = self.net(X_t)
+                    Y0_pred, jac_loss_0 = self.net(t0, x0)
 
-                    global loss_y
-                    loss_y = self._loss_func(Y_t_pred, Y_t.to(Y_t_pred))
+                    global loss_0
+                    loss_0 = self._loss_func(Y0_pred, Y0.to(Y0_pred))
+
+                    Yb_low_pred, jac_loss_bl = self.net(tb, xb_low)
+                    Yb_high_pred, jac_loss_bh = self.net(tb, xb_high)
+
+                    global loss_b
+                    loss_b = self.get_loss_b(Yb_low_pred, Yb_high_pred, xb_low, xb_high)
 
                     global forward_time
-                    forward_time, (y_pred, jac_loss_f) = timeit(self.net)(X_f)
+                    forward_time, (Yf_pred, jac_loss_f) = timeit(self.net)(tf, xf)
                     forward_time -= self.net.jac_loss_time
 
                     global forward_nfe
                     forward_nfe = self.net.latest_nfe
 
-                    # dy_pred = torch.autograd.grad(
-                    #     y_pred.sum(),
-                    #     X_f,
-                    #     create_graph=True,
-                    # )[0]
-
-                    # ddy_pred = torch.autograd.grad(
-                    #     dy_pred.sum(),
-                    #     X_f,
-                    #     create_graph=True,
-                    # )[0]
-
-                    # mu = 1.
-                    # ddy = + mu * (1 - y_pred ** 2) * dy_pred - y_pred
-                    # ode = ddy_pred - ddy
-
                     global loss_f, loss_time
-                    loss_time, loss_f = timeit(self.get_loss_f)(y_pred, X_f)
-                    loss_time += self.net.jac_loss_time
-                    # loss_f = self._loss_func(ode, torch.zeros_like(ode))
+                    loss_time, loss_f = timeit(self.get_loss_f)(Yf_pred, xf, tf)
 
                     global backward_nfe
                     backward_nfe = self.net.latest_backward_nfe
 
                     global jac_loss
-                    # jac_loss = (jac_loss_t + jac_loss_f) / 2
-                    jac_loss = jac_loss_t + jac_loss_f
+                    jac_loss = (self.N0 * jac_loss_0 + self.Nb * (jac_loss_bh + jac_loss_bl) + self.Nf * jac_loss_f) \
+                                / (self.N0 + 2 * self.Nb + self.Nf)
 
                     global loss
-                    loss = loss_y + self.lamb * loss_f + self.jac_loss_lamb * jac_loss
+                    loss = loss_0 + loss_b + loss_f + jac_loss
 
                     if loss.requires_grad:
                         global backward_time
@@ -793,7 +777,8 @@ class PIDEQTrainer(PINNTrainer):
 
         losses = {
             'all': loss.item(),
-            'y': loss_y.item(),
+            '0': loss_0.item(),
+            'b': loss_b.item(),
             'f': loss_f.item(),
             'jac': jac_loss.item(),
             'fwd_nfe': forward_nfe,
