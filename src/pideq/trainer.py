@@ -555,7 +555,7 @@ class PINNTrainer(Trainer):
         return loss + loss_x
 
     def get_loss_f(self, h, x, t):
-        h_t = self.get_jacobian(h, x)
+        h_t = self.get_jacobian(h, t)
         h_x = self.get_jacobian(h, x)
         h_xx = self.get_jacobian(h_x, x)
 
