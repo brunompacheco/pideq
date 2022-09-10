@@ -62,7 +62,8 @@ class Trainer(ABC):
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  lr_scheduler_params: dict = None, mixed_precision=True,
                  device=None, wandb_project=None, wandb_group=None,
-                 logger=None, checkpoint_every=50, random_seed=42) -> None:
+                 logger=None, checkpoint_every=50, random_seed=42,
+                 max_loss=None) -> None:
         self._is_initalized = False
 
         if device is None:
@@ -107,6 +108,8 @@ class Trainer(ABC):
         self._log_to_wandb = False if wandb_project is None else True
         self.wandb_project = wandb_project
         self.wandb_group = wandb_group
+
+        self.max_loss = max_loss
 
     @classmethod
     def load_trainer(cls, net: nn.Module, run_id: str, wandb_project=None,
@@ -325,6 +328,10 @@ class Trainer(ABC):
                 f"{epoch_end_time - epoch_start_time:.2f} seconds"
             )
 
+            if self.max_loss is not None:
+                if val_score > self.max_loss:
+                    break
+
             self._e += 1
 
         if self._log_to_wandb:
@@ -452,7 +459,8 @@ class PINNTrainer(Trainer):
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  mixed_precision=False, lr_scheduler_params: dict = None,
                  device=None, wandb_project="pideq-nls", wandb_group=None,
-                 logger=None, checkpoint_every=1000, random_seed=None):
+                 logger=None, checkpoint_every=1000, random_seed=None,
+                 max_loss=None):
         # initial state
         self.h0_func = lambda x: 4 / (np.exp(x) + np.exp(-x))
         self.h_bounds = (-5, 5)
@@ -464,7 +472,8 @@ class PINNTrainer(Trainer):
         super().__init__(net, epochs, lr, optimizer, optimizer_params,
                          loss_func, lr_scheduler, lr_scheduler_params,
                          mixed_precision, device, wandb_project,
-                         wandb_group, logger, checkpoint_every, random_seed)
+                         wandb_group, logger, checkpoint_every, random_seed,
+                         max_loss)
 
         self.N0 = int(N0)    # number of collocation points
         self.Nb = int(Nb)    # number of collocation points
@@ -482,7 +491,7 @@ class PINNTrainer(Trainer):
         self.val_data = None
 
     def prepare_data(self):
-        data = loadmat('/mnt/hdd/Downloads/NLS.mat')
+        data = loadmat('/home/bruno/PINNs/main/Data/NLS.mat')
 
         t = data['tt'].flatten()[:,None]
         x = data['x'].flatten()[:,None]
@@ -678,27 +687,30 @@ class PINNTrainer(Trainer):
         return losses, times
 
 class PIDEQTrainer(PINNTrainer):
-    def __init__(self, net: PIDEQ, N0=50, Nb=50, Nf=20000,
+    def __init__(self, net: PIDEQ, N0=50, Nb=50, Nf=20000, jac_lambda=1.0,
                  val_dt=0.001 * np.pi / 2, epochs=5, lr=0.001,
                  optimizer: str = 'Adam', optimizer_params: dict = None,
                  lamb=0.1, loss_func: str = 'MSELoss',
                  lr_scheduler: str = None, mixed_precision=False,
                  lr_scheduler_params: dict = None, device=None,
                  wandb_project="pideq-nls", wandb_group=None, logger=None,
-                 checkpoint_every=1000, random_seed=None):
+                 checkpoint_every=1000, random_seed=None, max_loss=5):
+        self.jac_lambda = jac_lambda
+
         self._add_to_wandb_config({
             'n_states': net.n_states,
             'n_hidden': net.n_hidden,
             'solver_max_nfe': net.solver_kwargs['threshold'],
             'solver_eps': net.solver_kwargs['eps'],
             'solver': net.solver.__name__,
+            'jac_lambda': self.jac_lambda,
         })
 
         super().__init__(net, N0, Nb, Nf, val_dt, epochs, lr, optimizer,
                          optimizer_params, lamb, loss_func, lr_scheduler,
                          mixed_precision, lr_scheduler_params, device,
                          wandb_project, wandb_group, logger, checkpoint_every,
-                         random_seed)
+                         random_seed, max_loss)
 
     def train_pass(self):
         self.net.train()
@@ -749,7 +761,7 @@ class PIDEQTrainer(PINNTrainer):
                                 / (self.N0 + 2 * self.Nb + self.Nf)
 
                     global loss
-                    loss = loss_0 + loss_b + loss_f + jac_loss
+                    loss = (loss_0 + loss_b + loss_f + self.jac_lambda * jac_loss) / (1 + self.jac_lambda)
 
                     if loss.requires_grad:
                         global backward_time
