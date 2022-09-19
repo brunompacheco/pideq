@@ -85,6 +85,62 @@ class PIDEQ(DEQ):
 
         self.xb = np.array(xb)
 
+    @classmethod
+    def from_pinn(cls, pinn: PINN):
+        # compute number of states necessary to simulate the ANN
+        n_states = 0
+        for l in pinn.fcn[:-2]:  # exclude ouptut layer
+            if isinstance(l, nn.Linear):
+                n_states += l.out_features
+
+        deq = cls(
+            pinn.T,
+            n_in=pinn.fcn[0].in_features,
+            n_out=pinn.fcn[-1].out_features,
+            n_states=n_states,
+            n_hidden=0,
+            solver=forward_iteration,
+        )
+
+        # build A matrix from first layer
+
+        l1 = pinn.fcn[0]  # first layer
+
+        A_w = torch.zeros_like(deq.A.weight)
+        A_w[:l1.weight.shape[0]] = l1.weight
+        deq.A.weight = nn.Parameter(A_w)
+
+        A_b = torch.zeros_like(deq.A.bias)
+        A_b[:l1.bias.shape[0]] = l1.bias
+        deq.A.bias = nn.Parameter(A_b)
+
+        # build B matrix from hidden layers
+        B_w = torch.zeros_like(deq.B.weight)
+        B_b = torch.zeros_like(deq.B.bias)
+
+        l0 = pinn.fcn[0].out_features  # end of the last hidden layer's output
+        for l in pinn.fcn[1:-2]:  # skip first and last layers
+            if isinstance(l, nn.Linear):
+                B_w[l0:l0 + l.out_features,l0 - l.in_features:l0] = l.weight
+                B_b[l0:l0 + l.out_features] = l.bias
+                l0 = l0 + l.out_features
+
+        deq.B.weight = nn.Parameter(B_w)
+        deq.B.bias = nn.Parameter(B_b)
+
+        # build h function from last layer
+        ll = pinn.fcn[-1]  # last layer
+
+        h_w = torch.zeros_like(deq.h.weight)
+        h_w[:,-ll.weight.shape[-1]:] = ll.weight
+        deq.h.weight = nn.Parameter(h_w)
+
+        h_b = torch.zeros_like(deq.h.bias)
+        h_b[-ll.bias.shape[0]:] = ll.bias
+        deq.h.bias = nn.Parameter(h_b)
+
+        return deq
+
     def forward(self, t, x):
         x_ = torch.hstack((
             2 * t / self.T - 1,
