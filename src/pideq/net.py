@@ -82,12 +82,21 @@ class PINC(PINN):
         return y * y_range.to(y) + self.y0.to(y)
 
 class PIDEQ(PhysicsInformedModel,DEQ):
-    def __init__(self, T: float, n_in=2, n_out=2, n_states=100, n_hidden=1,
-                 nonlin=torch.tanh, always_compute_grad=False, solver=anderson,
+    def __init__(self, T: float, n_in=2, n_out=2, n_states=100,
+                 nonlin=torch.tanh, always_compute_grad=False, solver=forward_iteration,
                  solver_kwargs={'threshold': 200, 'eps':1e-4}, xb=[-5, 5],
                 ) -> None:
         PhysicsInformedModel.__init__(self,T)
-        DEQ.__init__(self, n_in, n_out, n_states, n_hidden, nonlin, always_compute_grad, solver, solver_kwargs)
+        DEQ.__init__(
+            self,
+            n_in=n_in,
+            n_out=n_out,
+            n_states=n_states,
+            phi=nonlin,
+            always_compute_grad=always_compute_grad,
+            solver=solver,
+            solver_kwargs=solver_kwargs,
+        )
 
         self.xb = np.array(xb)
 
@@ -107,45 +116,47 @@ class PIDEQ(PhysicsInformedModel,DEQ):
             n_in=pinn.fcn[0].in_features,
             n_out=pinn.fcn[-1].out_features,
             n_states=n_states,
-            n_hidden=0,
             solver=forward_iteration,
         )
 
-        # build A matrix from first layer
-
+        # build B matrix from first layer
         l1 = pinn.fcn[0]  # first layer
 
-        A_w = torch.zeros_like(self.A.weight)
-        A_w[:l1.weight.shape[0]] = l1.weight
-        self.A.weight = nn.Parameter(A_w)
-
-        A_b = torch.zeros_like(self.A.bias)
-        A_b[:l1.bias.shape[0]] = l1.bias
-        self.A.bias = nn.Parameter(A_b)
-
-        # build B matrix from hidden layers
         B_w = torch.zeros_like(self.B.weight)
+        B_w[:l1.weight.shape[0]] = l1.weight
+        self.B.weight = nn.Parameter(B_w)
+
         B_b = torch.zeros_like(self.B.bias)
+        B_b[:l1.bias.shape[0]] = l1.bias
+        self.B.bias = nn.Parameter(B_b)
+
+        # build A matrix from hidden layers
+        A_w = torch.zeros_like(self.A.weight)
+        A_b = torch.zeros_like(self.A.bias)
 
         l0 = pinn.fcn[0].out_features  # end of the last hidden layer's output
         for l in pinn.fcn[1:-2]:  # skip first and last layers
             if isinstance(l, nn.Linear):
-                B_w[l0:l0 + l.out_features,l0 - l.in_features:l0] = l.weight
-                B_b[l0:l0 + l.out_features] = l.bias
+                A_w[l0:l0 + l.out_features,l0 - l.in_features:l0] = l.weight
+                A_b[l0:l0 + l.out_features] = l.bias
                 l0 = l0 + l.out_features
 
-        self.B.weight = nn.Parameter(B_w)
-        self.B.bias = nn.Parameter(B_b)
+        self.A.weight = nn.Parameter(A_w)
+        self.A.bias = nn.Parameter(A_b)
 
-        # build h function from last layer
+        # build C matrix from last layer
         ll = pinn.fcn[-1]  # last layer
 
-        h_w = torch.zeros_like(self.h.weight)
-        h_w[:,-ll.weight.shape[-1]:] = ll.weight
-        self.h.weight = nn.Parameter(h_w)
+        C_w = torch.zeros_like(self.C.weight)
+        C_w[:,-ll.weight.shape[-1]:] = ll.weight
+        self.C.weight = nn.Parameter(C_w)
 
-        h_b = torch.zeros_like(self.h.bias)
-        h_b[-ll.bias.shape[0]:] = ll.bias
-        self.h.bias = nn.Parameter(h_b)
+        C_b = torch.zeros_like(self.C.bias)
+        C_b[-ll.bias.shape[0]:] = ll.bias
+        self.C.bias = nn.Parameter(C_b)
+
+        # build (erase) D matrix
+        self.D.weight = nn.Parameter(torch.zeros_like(self.D.weight))
+        self.D.bias = nn.Parameter(torch.zeros_like(self.D.bias))
 
         return self

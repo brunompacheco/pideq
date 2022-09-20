@@ -85,77 +85,62 @@ from pideq.deq.solvers import forward_iteration, anderson
 #         return y, jac_loss_estimate(f(x,z_star), z_star)
 
 class DEQ(nn.Module):
-    def __init__(self, n_in=1, n_out=1, n_states=20, n_hidden=0,
-                 nonlin=torch.tanh, always_compute_grad=False, solver=anderson,
+    def __init__(self, n_in=1, n_out=1, n_states=20, solver=forward_iteration,
+                 phi=torch.tanh, always_compute_grad=False,
                  solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
         super().__init__()
 
         self.n_states = n_states
-        self.n_hidden = n_hidden
 
-        self.B = nn.Linear(n_states,n_states)
-        self.A = nn.Linear(n_in,n_states)
+        self.A = nn.Linear(n_states,n_states)
+        self.B = nn.Linear(n_in,n_states)
+        self.C = nn.Linear(n_states,n_out)
+        self.D = nn.Linear(n_in,n_out)
 
-        self.nonlin = nonlin
-
-        if self.n_hidden > 0:
-            hidden_layers = list()
-            for _ in range(n_hidden):
-                linear = nn.Linear(n_states, n_states)
-                linear.weight = nn.Parameter(0.1 * linear.weight)
-                hidden_layers += [
-                    linear,
-                    nn.Tanh(),  # TODO refactor nonlin
-                ]
-            self.hidden = nn.Sequential(*hidden_layers)
-        else:
-            self.hidden = lambda x: x
+        self.phi = phi
 
         # decreasing initial weights to increase stability
         self.A.weight = nn.Parameter(0.1 * self.A.weight)
         self.B.weight = nn.Parameter(0.1 * self.B.weight)
+        self.C.weight = nn.Parameter(0.1 * self.C.weight)
+        self.D.weight = nn.Parameter(0.1 * self.D.weight)
 
         self.solver = solver
         self.solver_kwargs = solver_kwargs
 
         self.always_compute_grad = always_compute_grad
 
-        self.h = nn.Linear(n_states, n_out)
+    def f(self, u, x):
+        return self.phi(self.A(x) + self.B(u))
 
-    def f(self, x, z):
-        y = self.nonlin(self.A(x) + self.B(z))
-
-        return self.hidden(y)
-
-
-    def forward(self, x: torch.Tensor):
-        z0 = torch.zeros(x.shape[0], self.n_states).type(x.dtype).to(x.device)
+    def forward(self, u: torch.Tensor):
+        x0 = torch.zeros(u.shape[0], self.n_states).type(u.dtype).to(u.device)
 
         # compute forward pass
         with torch.no_grad():
             solver_out = self.solver(
-                lambda z : self.f(x, z),
-                z0,
+                lambda x : self.f(u, x),
+                x0,
                 **self.solver_kwargs
             )
-            z_star_ = solver_out['result']
+            x_star_ = solver_out['result']
             self.latest_nfe = solver_out['nstep']
-        z_star = self.f(x, z_star_)
+        x_star = self.f(u, x_star_)
 
         # (Prepare for) Backward pass, see step 3 above
         if self.training or self.always_compute_grad:
-            z_ = z_star.clone().detach().requires_grad_()
-            # z_star.requires_grad_()
+            x_ = x_star.clone().detach().requires_grad_()
+            # x_star.requires_grad_()
             # re-engage autograd. this is necessary to add the df/d(*) hook
-            f_ = self.f(x, z_)
+            f_ = self.f(u, x_)
 
             # Jacobian-related computations, see additional step above. For instance:
             if self.training:
                 start_time = time()
-                jac_loss = jac_loss_estimate(f_, z_, vecs=1)
+                jac_loss = jac_loss_estimate(f_, x_, vecs=1)
                 self.jac_loss_time = time() - start_time
 
-            # new_z_start already has the df/d(*) hook, but the J_g^-1 must be added mannually
+            # new_x_start already has the df/d(*) hook, but the J_g^-1 must be added mannually
             def backward_hook(grad):
                 # the following is necessary to add breakpoints here
                 # import pydevd
@@ -169,12 +154,12 @@ class DEQ(nn.Module):
                 # backwards graph of f_ disappears in the second call of this
                 # hook during loss.backward()
                 with torch.enable_grad():
-                    f_ = self.f(x, z_)
+                    f_ = self.f(u, x_)
 
                 # Compute the fixed point of yJ + grad, where J=J_f is the Jacobian of f at z_star
                 # forward iteration is the only solver through which I could backprop (tested with gradgradcheck)
                 backward_solver_out = forward_iteration(
-                    lambda y: torch.autograd.grad(f_, z_, y, retain_graph=True)[0] + grad,
+                    lambda y: torch.autograd.grad(f_, x_, y, retain_graph=True)[0] + grad,
                     torch.zeros_like(grad),
                     **self.solver_kwargs
                 )
@@ -183,9 +168,9 @@ class DEQ(nn.Module):
 
                 return new_grad
 
-            self.hook = z_star.register_hook(backward_hook)
+            self.hook = x_star.register_hook(backward_hook)
 
-        y = self.h(z_star)
+        y = self.C(x_star) + self.D(u)
 
         if self.training:
             return y, jac_loss
@@ -201,26 +186,26 @@ if __name__ == '__main__':
     n_out = 3
     n_states = 4
 
-    x = torch.rand(batch_size,n_in).double()
-    x.requires_grad_()
+    u = torch.rand(batch_size,n_in).double()
+    u.requires_grad_()
 
-    z0 = torch.zeros(x.shape[0], n_states).double()
-    z0.requires_grad_()
+    x0 = torch.zeros(u.shape[0], n_states).double()
+    x0.requires_grad_()
 
     deq = DEQ(n_in, n_out, n_states, always_compute_grad=True,
               solver_kwargs={'threshold': 1000, 'eps': 1e-7})
     deq = deq.double()
 
     # torch.autograd.gradcheck(
-    # lambda x: deq.get_eq.apply(x, z0, deq.A, deq.B, deq.b),
-    #     x,
+    # lambda x: deq.get_eq.apply(u, x0, deq.A, deq.B, deq.b),
+    #     u,
     #     eps=1e-4,
     #     atol=1e-5,
     # )
 
     torch.autograd.gradcheck(
-        lambda x: deq(x)[0],
-        x,
+        lambda u: deq(u)[0],
+        u,
         eps=1e-4,
         atol=1e-5,
         check_undefined_grad=False,

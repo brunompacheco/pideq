@@ -491,7 +491,7 @@ class PINNTrainer(Trainer):
         self.val_data = None
 
     def prepare_data(self):
-        data = loadmat('/home/bruno/PINNs/main/Data/NLS.mat')
+        data = loadmat('/home/brunompacheco/Downloads/NLS.mat')
 
         t = data['tt'].flatten()[:,None]
         x = data['x'].flatten()[:,None]
@@ -699,7 +699,6 @@ class PIDEQTrainer(PINNTrainer):
 
         self._add_to_wandb_config({
             'n_states': net.n_states,
-            'n_hidden': net.n_hidden,
             'solver_max_nfe': net.solver_kwargs['threshold'],
             'solver_eps': net.solver_kwargs['eps'],
             'solver': net.solver.__name__,
