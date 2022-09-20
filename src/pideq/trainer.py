@@ -672,7 +672,7 @@ class PINNTrainer(Trainer):
         h = torch.sqrt(Y[:,0]**2 + Y[:,1]**2).cpu().numpy()
         h_pred = torch.sqrt(y_pred[:,0]**2 + y_pred[:,1]**2).cpu().numpy()
 
-        l2 = np.linalg.norm(h - h_pred, 2) / np.linalg.norm(h_pred)
+        l2 = np.linalg.norm(h - h_pred, 2) / np.linalg.norm(h_pred, 2)
 
         losses = {
             'all': val_loss.item(),
