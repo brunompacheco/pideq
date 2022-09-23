@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from time import time
 
+import cvxpy as cp
 import numpy as np
 import torch
 import torch.nn as nn
@@ -811,6 +812,139 @@ class PIDEQTrainer(PINNTrainer):
 
         losses['fwd_nfe'] = self.net.latest_nfe
         losses['bwd_nfe'] = self.net.latest_backward_nfe
+
+        return losses, times
+
+class PIDEQTrainerV2(PIDEQTrainer):
+    def __init__(self, net: PIDEQ, N0=50, Nb=50, Nf=20000, kappa=1.0,
+                 val_dt=0.001 * np.pi / 2, epochs=5, lr=0.001,
+                 optimizer: str = 'Adam', optimizer_params: dict = None,
+                 lamb=0.1, loss_func: str = 'MSELoss', lr_scheduler: str = None,
+                 mixed_precision=False, lr_scheduler_params: dict = None,
+                 device=None, wandb_project="pideq-nls", wandb_group=None,
+                 logger=None, checkpoint_every=1000, random_seed=None,
+                 max_loss=5):
+        super().__init__(net, N0, Nb, Nf, 0, val_dt, epochs, lr, optimizer,
+                         optimizer_params, lamb, loss_func, lr_scheduler,
+                         mixed_precision, lr_scheduler_params, device,
+                         wandb_project, wandb_group, logger, checkpoint_every,
+                         random_seed, max_loss)
+
+        self.kappa = kappa
+
+        self.net.compute_jac_loss = False
+
+    def project_gradient_update(self):
+        A0 = self.net.A.weight.detach().numpy()
+
+        A_rows = list()
+        for i in range(A0.shape[0]):
+            a = cp.Variable(A0.shape[1], complex=False)
+
+            constraint = [cp.norm(a, p=1) <= self.kappa - 1e-3,]
+
+            prob = cp.Problem(cp.Minimize(cp.norm(a - A0[i], p=2)), constraint)
+            prob.solve(verbose=False)
+
+            A_rows.append(a.value)
+        A = np.vstack(A_rows)
+        A_weight = torch.from_numpy(A).to(self.net.A.weight)
+
+        self.net.A.weight = nn.Parameter(A_weight)
+
+    def train_pass(self):
+        self.net.train()
+
+        # training data
+        (X0, Y0), Xb, Xf = self.data
+        x0, t0 = X0
+        (xb_low, xb_high), tb = Xb
+        xf, tf = Xf
+
+        xb_low.requires_grad_()
+        xb_high.requires_grad_()
+        tb.requires_grad_()
+        xf.requires_grad_()
+        tf.requires_grad_()
+        with torch.set_grad_enabled(True):
+            def closure():
+                if torch.is_grad_enabled():
+                    self._optim.zero_grad()
+
+                with self.autocast_if_mp():
+                    Y0_pred = self.net(t0, x0)
+
+                    global loss_0
+                    loss_0 = self._loss_func(Y0_pred, Y0.to(Y0_pred))
+
+                    Yb_low_pred = self.net(tb, xb_low)
+                    Yb_high_pred = self.net(tb, xb_high)
+
+                    global loss_b
+                    loss_b = self.get_loss_b(Yb_low_pred, Yb_high_pred, xb_low, xb_high)
+
+                    global forward_time
+                    forward_time, Yf_pred = timeit(self.net)(tf, xf)
+
+                    global forward_nfe
+                    forward_nfe = self.net.latest_nfe
+
+                    global loss_f, loss_time
+                    loss_time, loss_f = timeit(self.get_loss_f)(Yf_pred, xf, tf)
+
+                    global backward_nfe
+                    backward_nfe = self.net.latest_backward_nfe
+
+                    global loss
+                    loss = loss_0 + loss_b + loss_f
+
+                    if loss.requires_grad:
+                        global backward_time
+
+                        if self.mixed_precision:
+                            backward_time, _ = timeit(self._scaler.scale(loss).backward)()
+                        else:
+                            backward_time, _ = timeit(loss.backward)()
+
+                return loss
+
+            if self.optimizer == 'LBFGS':
+                self._optim.step(closure)
+            else:
+                closure()
+
+                if self.mixed_precision:
+                    self._scaler.step(self._optim)
+                    self._scaler.update()
+                else:
+                    self._optim.step()
+
+            if self.lr_scheduler is not None:
+                self._scheduler.step()
+
+        with torch.no_grad():
+            A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
+            if A_oo.item() > self.kappa:
+                grad_proj_time, _ = timeit(self.project_gradient_update())
+                A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
+            else:
+                grad_proj_time = 0
+
+        losses = {
+            'all': loss.item(),
+            '0': loss_0.item(),
+            'b': loss_b.item(),
+            'f': loss_f.item(),
+            'fwd_nfe': forward_nfe,
+            'bwd_nfe': backward_nfe,
+            'A_oo': A_oo.item(),
+        }
+        times = {
+            'forward': forward_time,
+            'loss': loss_time,
+            'backward': backward_time,
+            'grad_proj': grad_proj_time,
+        }
 
         return losses, times
 
