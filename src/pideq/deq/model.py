@@ -86,7 +86,7 @@ from pideq.deq.solvers import forward_iteration, anderson
 
 class DEQ(nn.Module):
     def __init__(self, n_in=1, n_out=1, n_states=20, solver=forward_iteration,
-                 phi=torch.tanh, always_compute_grad=False,
+                 phi=torch.tanh, always_compute_grad=False, compute_jac_loss=True,
                  solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
         super().__init__()
 
@@ -109,6 +109,7 @@ class DEQ(nn.Module):
         self.solver_kwargs = solver_kwargs
 
         self.always_compute_grad = always_compute_grad
+        self.compute_jac_loss = compute_jac_loss
 
     def f(self, u, x):
         return self.phi(self.A(x) + self.B(u))
@@ -135,7 +136,7 @@ class DEQ(nn.Module):
             f_ = self.f(u, x_)
 
             # Jacobian-related computations, see additional step above. For instance:
-            if self.training:
+            if self.training and self.compute_jac_loss:
                 start_time = time()
                 jac_loss = jac_loss_estimate(f_, x_, vecs=1)
                 self.jac_loss_time = time() - start_time
@@ -172,7 +173,7 @@ class DEQ(nn.Module):
 
         y = self.C(x_star) + self.D(u)
 
-        if self.training:
+        if self.training and self.compute_jac_loss:
             return y, jac_loss
         else:
             return y
