@@ -786,6 +786,9 @@ class PIDEQTrainer(PINNTrainer):
             if self.lr_scheduler is not None:
                 self._scheduler.step()
 
+        with torch.no_grad():
+            A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
+
         losses = {
             'all': loss.item(),
             '0': loss_0.item(),
@@ -794,6 +797,7 @@ class PIDEQTrainer(PINNTrainer):
             'jac': jac_loss.item(),
             'fwd_nfe': forward_nfe,
             'bwd_nfe': backward_nfe,
+            'A_oo': A_oo.item(),
         }
         times = {
             'forward': forward_time,
