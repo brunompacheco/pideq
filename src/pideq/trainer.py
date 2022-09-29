@@ -839,7 +839,7 @@ class PIDEQTrainerV2(PIDEQTrainer):
         self.net.compute_jac_loss = False
 
     def project_gradient_update(self):
-        A0 = self.net.A.weight.detach().numpy()
+        A0 = self.net.A.weight.detach().cpu().numpy()
 
         A_rows = list()
         for i in range(A0.shape[0]):
@@ -848,13 +848,18 @@ class PIDEQTrainerV2(PIDEQTrainer):
             constraint = [cp.norm(a, p=1) <= self.kappa - 1e-3,]
 
             prob = cp.Problem(cp.Minimize(cp.norm(a - A0[i], p=2)), constraint)
-            prob.solve(verbose=False)
+            try:
+                prob.solve(verbose=False, abstol=1e-6, feastol=1e-6)
+                # prob.solve(verbose=False, solver='SCS')
 
-            A_rows.append(a.value)
+                A_rows.append(a.value)
+            except cp.SolverError:
+                A_rows.append(A0[i])
+
         A = np.vstack(A_rows)
         A_weight = torch.from_numpy(A).to(self.net.A.weight)
 
-        self.net.A.weight = nn.Parameter(A_weight)
+        self.net.A.weight.data.copy_(A_weight)
 
     def train_pass(self):
         self.net.train()
@@ -929,7 +934,7 @@ class PIDEQTrainerV2(PIDEQTrainer):
         with torch.no_grad():
             A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
             if A_oo.item() > self.kappa:
-                grad_proj_time, _ = timeit(self.project_gradient_update())
+                grad_proj_time, _ = timeit(self.project_gradient_update)()
                 A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
             else:
                 grad_proj_time = 0
