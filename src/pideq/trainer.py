@@ -824,13 +824,17 @@ class PIDEQTrainerV2(PIDEQTrainer):
                  device=None, wandb_project="pideq-nls", wandb_group=None,
                  logger=None, checkpoint_every=1000, random_seed=None,
                  max_loss=5):
+        self.kappa = kappa
+
+        self._add_to_wandb_config({
+            'kappa': self.kappa,
+        })
+
         super().__init__(net, N0, Nb, Nf, 0, val_dt, epochs, lr, optimizer,
                          optimizer_params, lamb, loss_func, lr_scheduler,
                          mixed_precision, lr_scheduler_params, device,
                          wandb_project, wandb_group, logger, checkpoint_every,
                          random_seed, max_loss)
-
-        self.kappa = kappa
 
         self.net.compute_jac_loss = False
 
