@@ -852,9 +852,9 @@ class PIDEQTrainerV2(PIDEQTrainer):
         self.net.compute_jac_loss = False
 
         # initialize gradient projection optimization problem
-        # decomposed for each row of A
-        a0 = cp.Parameter(self.net.A.weight.shape[0], complex=False)
-        a = cp.Variable(self.net.A.weight.shape[0], complex=False)
+        # decomposed for each row of A (including bias, assuming x = (x,1))
+        a0 = cp.Parameter(self.net.A.weight.shape[0] + 1, complex=False)
+        a = cp.Variable(self.net.A.weight.shape[0] + 1, complex=False)
         constraint = [cp.norm(a, p=1) <= self.kappa - 1e-3,]
 
         self._pgd_prob = cp.Problem(cp.Minimize(cp.norm(a - a0, p=2)), constraint)
@@ -863,7 +863,10 @@ class PIDEQTrainerV2(PIDEQTrainer):
         self._pgd_pool = Pool()
 
     def project_gradient_update(self):
-        A0 = self.net.A.weight.detach().cpu().numpy()
+        A0 = np.hstack([  # includes bias for x = (x,1)
+            self.net.A.weight.data.detach().cpu().numpy(),
+            self.net.A.bias.data.detach().cpu().numpy()[...,None],
+        ])
 
         A_rows = self._pgd_pool.map(
             _run_get_a,
@@ -871,9 +874,11 @@ class PIDEQTrainerV2(PIDEQTrainer):
         )
 
         A = np.vstack(A_rows)
-        A_weight = torch.from_numpy(A).to(self.net.A.weight.data)
+        A_weight = torch.from_numpy(A[:,:-1]).to(self.net.A.weight.data)
+        A_bias = torch.from_numpy(A[:,-1]).to(self.net.A.bias.data)
 
         self.net.A.weight.data.copy_(A_weight)
+        self.net.A.bias.data.copy_(A_bias)
 
     def train_pass(self):
         self.net.train()
