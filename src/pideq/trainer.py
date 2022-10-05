@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 import logging
+from multiprocessing import Pool
 import random
 
 from abc import ABC, abstractmethod
@@ -39,6 +40,18 @@ def timeit(fun):
         return end_time - start_time, f_ret
 
     return fun_
+
+def _run_get_a(args):
+    prob, A0, i = args
+
+    prob.parameters()[0].value = A0[i]  # a0
+    try:
+        prob.solve(verbose=False, abstol=1e-6, feastol=1e-6)
+        # prob.solve(verbose=False, solver='SCS')
+
+        return prob.variables()[0].value  # a
+    except cp.SolverError:
+        return A0[i]
 
 class Trainer(ABC):
     """Generic trainer for PyTorch NNs.
@@ -492,7 +505,7 @@ class PINNTrainer(Trainer):
         self.val_data = None
 
     def prepare_data(self):
-        data = loadmat('/home/brunompacheco/Downloads/NLS.mat')
+        data = loadmat('/home/bruno/PINNs/main/Data/NLS.mat')
 
         t = data['tt'].flatten()[:,None]
         x = data['x'].flatten()[:,None]
@@ -838,26 +851,27 @@ class PIDEQTrainerV2(PIDEQTrainer):
 
         self.net.compute_jac_loss = False
 
+        # initialize gradient projection optimization problem
+        # decomposed for each row of A
+        a0 = cp.Parameter(self.net.A.weight.shape[0], complex=False)
+        a = cp.Variable(self.net.A.weight.shape[0], complex=False)
+        constraint = [cp.norm(a, p=1) <= self.kappa - 1e-3,]
+
+        self._pgd_prob = cp.Problem(cp.Minimize(cp.norm(a - a0, p=2)), constraint)
+
+        # multiprocessing pool for parallelization of gradient projection
+        self._pgd_pool = Pool()
+
     def project_gradient_update(self):
         A0 = self.net.A.weight.detach().cpu().numpy()
 
-        A_rows = list()
-        for i in range(A0.shape[0]):
-            a = cp.Variable(A0.shape[1], complex=False)
-
-            constraint = [cp.norm(a, p=1) <= self.kappa - 1e-3,]
-
-            prob = cp.Problem(cp.Minimize(cp.norm(a - A0[i], p=2)), constraint)
-            try:
-                prob.solve(verbose=False, abstol=1e-6, feastol=1e-6)
-                # prob.solve(verbose=False, solver='SCS')
-
-                A_rows.append(a.value)
-            except cp.SolverError:
-                A_rows.append(A0[i])
+        A_rows = self._pgd_pool.map(
+            _run_get_a,
+            [(self._pgd_prob,A0,i) for i in range(A0.shape[0])]
+        )
 
         A = np.vstack(A_rows)
-        A_weight = torch.from_numpy(A).to(self.net.A.weight)
+        A_weight = torch.from_numpy(A).to(self.net.A.weight.data)
 
         self.net.A.weight.data.copy_(A_weight)
 
