@@ -85,7 +85,7 @@ class PIDEQ(PhysicsInformedModel,DEQ):
     def __init__(self, T: float, n_in=2, n_out=2, n_states=100, compute_jac_loss=True,
                  nonlin=torch.tanh, always_compute_grad=False, solver=forward_iteration,
                  solver_kwargs={'threshold': 200, 'eps':1e-4}, xb=[-5, 5],
-                ) -> None:
+                 weight_initialization_factor=.1) -> None:
         PhysicsInformedModel.__init__(self,T)
         DEQ.__init__(
             self,
@@ -97,6 +97,7 @@ class PIDEQ(PhysicsInformedModel,DEQ):
             compute_jac_loss=compute_jac_loss,
             solver=solver,
             solver_kwargs=solver_kwargs,
+            weight_initialization_factor=weight_initialization_factor,
         )
 
         self.xb = np.array(xb)
