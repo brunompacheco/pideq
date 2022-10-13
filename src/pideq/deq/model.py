@@ -87,7 +87,8 @@ from pideq.deq.solvers import forward_iteration, anderson
 class DEQ(nn.Module):
     def __init__(self, n_in=1, n_out=1, n_states=20, solver=forward_iteration,
                  phi=torch.tanh, always_compute_grad=False, compute_jac_loss=True,
-                 solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
+                 solver_kwargs={'threshold': 200, 'eps':1e-3},
+                 weight_initialization_factor=.1) -> None:
         super().__init__()
 
         self.n_states = n_states
@@ -100,10 +101,10 @@ class DEQ(nn.Module):
         self.phi = phi
 
         # decreasing initial weights to increase stability
-        self.A.weight = nn.Parameter(0.1 * self.A.weight)
-        self.B.weight = nn.Parameter(0.1 * self.B.weight)
-        self.C.weight = nn.Parameter(0.1 * self.C.weight)
-        self.D.weight = nn.Parameter(0.1 * self.D.weight)
+        self.A.weight = nn.Parameter(weight_initialization_factor * self.A.weight)
+        self.B.weight = nn.Parameter(weight_initialization_factor * self.B.weight)
+        self.C.weight = nn.Parameter(weight_initialization_factor * self.C.weight)
+        self.D.weight = nn.Parameter(weight_initialization_factor * self.D.weight)
 
         self.solver = solver
         self.solver_kwargs = solver_kwargs
