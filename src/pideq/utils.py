@@ -7,7 +7,7 @@ import torch.nn as nn
 
 
 def load_from_wandb(net: nn.Module, run_id: str,
-                    project='pideqc-vdp', model_fname='model_last'):
+                    project='pideq-ghaoui', model_fname='model_last'):
     best_model_file = wandb.restore(
         f'{model_fname}.pth',
         run_path=f"brunompac/{project}/{run_id}",
