@@ -72,7 +72,7 @@ class Trainer(ABC):
         NumPy as PyTorch (makes trainig reproducible).
     """
     def __init__(self, net: nn.Module, epochs=5, lr= 0.1,
-                 optimizer: str = 'Adam', optimizer_params: dict = None,
+                 optimizer: str = 'Adam', optimizer_params: dict = dict(),
                  loss_func: str = 'MSELoss', lr_scheduler: str = None,
                  lr_scheduler_params: dict = None, mixed_precision=True,
                  device=None, wandb_project=None, wandb_group=None,
@@ -124,6 +124,17 @@ class Trainer(ABC):
         self.wandb_group = wandb_group
 
         self.max_loss = max_loss
+
+    def _load_optim(self, state_dict=None):
+        Optimizer = eval(f"torch.optim.{self.optimizer}")
+        self._optim = Optimizer(
+            filter(lambda p: p.requires_grad, self.net.parameters()),
+            lr=self.lr,
+            **self.optimizer_params
+        )
+
+        if state_dict is not None:
+            self._optim.load_state_dict(state_dict)
 
     @classmethod
     def load_trainer(cls, net: nn.Module, run_id: str, wandb_project=None,
@@ -178,14 +189,7 @@ class Trainer(ABC):
 
         self.l.info(f'Resuming training of {wandb.run.name} at epoch {self._e}')
 
-        # load optimizer
-        Optimizer = eval(f"torch.optim.{self.optimizer}")
-        self._optim = Optimizer(
-            filter(lambda p: p.requires_grad, self.net.parameters()),
-            lr=self.lr,
-            **self.optimizer_params
-        )
-        self._optim.load_state_dict(checkpoint['optimizer_state_dict'])
+        self._load_optim(checkpoint['optimizer_state_dict'])
 
         # load scheduler
         if self.lr_scheduler is not None:
@@ -210,11 +214,7 @@ class Trainer(ABC):
     def setup_training(self):
         self.l.info('Setting up training')
 
-        Optimizer = eval(f"torch.optim.{self.optimizer}")
-        self._optim = Optimizer(
-            filter(lambda p: p.requires_grad, self.net.parameters()),
-            lr=self.lr
-        )
+        self._load_optim()
 
         if self.lr_scheduler is not None:
             Scheduler = eval(f"torch.optim.lr_scheduler.{self.lr_scheduler}")
@@ -468,26 +468,28 @@ class Trainer(ABC):
 class DEQTrainer(Trainer):
     """Trainer for synthetic data using a DEQ."""
     def __init__(self, net: DEQ, N=200, epochs=5000, lr=1e-3, optimizer: str = 'Adam',
-                 optimizer_params: dict = None, A_oo_lambda=0., A_oo_n=4,
+                 optimizer_params: dict = dict(), A_oo_lambda=0., A_oo_n=4,
                  loss_func: str = 'MSELoss', lr_scheduler: str = None, kappa=-1,
                  lr_scheduler_params: dict = None, project_grad=False, eps=1e-3,
                  device=None, wandb_project="pideq-ghaoui", wandb_group=None,
                  logger=None, checkpoint_every=1000, random_seed=None,
-                 max_loss=None):
+                 max_loss=None, bcd_every=-1):
         self.N = int(N)    # number of points
         self.A_oo_lambda = A_oo_lambda
         self.A_oo_n = A_oo_n
         self.kappa = kappa
         self.project_grad = project_grad
         self.eps = eps
+        self.bcd_every = bcd_every
 
         self._add_to_wandb_config({
             'N': self.N,
             'A_oo_lambda': self.A_oo_lambda,
             'A_oo_n': self.A_oo_n,
             'kappa': self.kappa,
-            'eps': self.eps,
             'project_grad': self.project_grad,
+            'eps': self.eps,
+            'bcd_every': self.bcd_every,
         })
 
         # initial state
@@ -511,6 +513,29 @@ class DEQTrainer(Trainer):
 
             # multiprocessing pool for parallelization of gradient projection
             self._pgd_pool = Pool()
+
+    def _load_optim(self, state_dict=None):
+        if self.bcd_every > 0:
+            Optimizer = eval(f"torch.optim.{self.optimizer}")
+            self._optim = Optimizer(
+                [self.net.A.weight, self.net.A.bias, self.net.B.weight, self.net.B.bias],
+                lr=self.lr,
+                **self.optimizer_params
+            )
+            if state_dict is not None:
+                self._optim.load_state_dict(state_dict)
+
+            self._optim_CD = torch.optim.LBFGS(
+                [self.net.C.weight, self.net.C.bias, self.net.D.weight, self.net.D.bias],
+            )
+        else:
+            return super()._load_optim(state_dict)
+
+    def _run_epoch(self):
+        if self._e % self.bcd_every == 0:
+            self.train_pass_CD()
+
+        return super()._run_epoch()
 
     def prepare_data(self):
         self.f_true = lambda u: 5 * np.cos(np.pi * u) * np.exp(-np.abs(u) / 2)
@@ -576,6 +601,21 @@ class DEQTrainer(Trainer):
 
         A.weight.data.copy_(A_weight)
         A.bias.data.copy_(A_bias)
+
+    def train_pass_CD(self):
+        X, y = self.data
+
+        self.net.train()
+        with torch.set_grad_enabled(True):
+            def closure():
+                if torch.is_grad_enabled():
+                    self._optim_CD.zero_grad()
+
+                y_hat = 6 * self.net(X)
+
+                return self._loss_func(y, y_hat)
+
+            self._optim_CD.step(closure)
 
     def train_pass(self):
         X, y = self.data
