@@ -84,27 +84,31 @@ from pideq.deq.solvers import forward_iteration, anderson
 
 #         return y, jac_loss_estimate(f(x,z_star), z_star)
 
-class DEQ(nn.Module):
-    def __init__(self, n_in=1, n_out=1, n_states=20, solver=forward_iteration,
-                 phi=torch.tanh, always_compute_grad=False, compute_jac_loss=True,
+class ImplicitLayer(nn.Module):
+    """ Implicit layer inspired in Ghaoui's formulation.
+
+    Given an input `u`, returns the vector `z*` which solves
+        z* = phi(Az* + Bu)
+    where A and B are linear transformations (with bias).
+    """
+    def __init__(self, in_features=1, out_features=1, phi=torch.tanh,
+                 solver=forward_iteration, always_compute_grad=False,
+                 compute_jac_loss=True,
                  solver_kwargs={'threshold': 200, 'eps':1e-3},
                  weight_initialization_factor=.1) -> None:
         super().__init__()
 
-        self.n_states = n_states
+        self.out_features = out_features
+        self.in_features = in_features
 
-        self.A = nn.Linear(n_states,n_states)
-        self.B = nn.Linear(n_in,n_states)
-        self.C = nn.Linear(n_states,n_out)
-        self.D = nn.Linear(n_in,n_out)
+        self.A = nn.Linear(self.out_features, self.out_features)
+        self.B = nn.Linear(self.in_features, self.out_features)
 
         self.phi = phi
 
         # decreasing initial weights to increase stability
         self.A.weight = nn.Parameter(weight_initialization_factor * self.A.weight)
         self.B.weight = nn.Parameter(weight_initialization_factor * self.B.weight)
-        self.C.weight = nn.Parameter(weight_initialization_factor * self.C.weight)
-        self.D.weight = nn.Parameter(weight_initialization_factor * self.D.weight)
 
         self.solver = solver
         self.solver_kwargs = solver_kwargs
@@ -112,39 +116,41 @@ class DEQ(nn.Module):
         self.always_compute_grad = always_compute_grad
         self.compute_jac_loss = compute_jac_loss
 
-    def f(self, u, x):
-        return self.phi(self.A(x) + self.B(u))
+    def f(self, u, z):
+        return self.phi(self.A(z) + self.B(u))
 
     def forward(self, u: torch.Tensor):
-        x0 = torch.zeros(u.shape[0], self.n_states).type(u.dtype).to(u.device)
+        """Based on Locus Lab's implementation.
+        """
+        z0 = torch.zeros(u.shape[0], self.out_features).type(u.dtype).to(u.device)
 
         # compute forward pass
         with torch.no_grad():
             solver_out = self.solver(
-                lambda x : self.f(u, x),
-                x0,
+                lambda z : self.f(u, z),
+                z0,
                 **self.solver_kwargs
             )
-            x_star_ = solver_out['result']
+            z_star_ = solver_out['result']
             self.latest_nfe = solver_out['nstep']
-        x_star = self.f(u, x_star_)
+        z_star = self.f(u, z_star_)
 
-        # (Prepare for) Backward pass, see step 3 above
+        # (Prepare for) Backward pass
         if self.training or self.always_compute_grad:
-            x_ = x_star.clone().detach().requires_grad_()
-            # x_star.requires_grad_()
-            # re-engage autograd. this is necessary to add the df/d(*) hook
-            f_ = self.f(u, x_)
+            z_ = z_star.clone().detach().requires_grad_()
 
-            # Jacobian-related computations, see additional step above. For instance:
+            # re-engage autograd. this is necessary to add the df/d(*) hook
+            f_ = self.f(u, z_)
+
+            # Jacobian-related computations
             if self.training and self.compute_jac_loss:
                 start_time = time()
-                jac_loss = jac_loss_estimate(f_, x_, vecs=1)
+                jac_loss = jac_loss_estimate(f_, z_, vecs=1)
                 self.jac_loss_time = time() - start_time
 
-            # new_x_start already has the df/d(*) hook, but the J_g^-1 must be added mannually
+            # new_z_start already has the df/d(*) hook, but the J_g^-1 must be added mannually
             def backward_hook(grad):
-                # the following is necessary to add breakpoints here
+                # the following is necessary to add breakpoints here:
                 # import pydevd
                 # pydevd.settrace(suspend=False, trace_only_current_thread=True)
 
@@ -156,12 +162,14 @@ class DEQ(nn.Module):
                 # backwards graph of f_ disappears in the second call of this
                 # hook during loss.backward()
                 with torch.enable_grad():
-                    f_ = self.f(u, x_)
+                    f_ = self.f(u, z_)
 
-                # Compute the fixed point of yJ + grad, where J=J_f is the Jacobian of f at z_star
-                # forward iteration is the only solver through which I could backprop (tested with gradgradcheck)
+                # Compute the fixed point of yJ + grad, where J=J_f is the
+                # Jacobian of f at z_star. `forward iteration` is the only
+                # solver through which I could backprop (tested with
+                # gradgradcheck).
                 backward_solver_out = forward_iteration(
-                    lambda y: torch.autograd.grad(f_, x_, y, retain_graph=True)[0] + grad,
+                    lambda y: torch.autograd.grad(f_, z_, y, retain_graph=True)[0] + grad,
                     torch.zeros_like(grad),
                     **self.solver_kwargs
                 )
@@ -170,11 +178,39 @@ class DEQ(nn.Module):
 
                 return new_grad
 
-            self.hook = x_star.register_hook(backward_hook)
-
-        y = self.C(x_star) + self.D(u)
+            self.hook = z_star.register_hook(backward_hook)
 
         if self.training and self.compute_jac_loss:
+            return z_star, jac_loss
+        else:
+            return z_star
+
+class DEQ(nn.Module):
+    def __init__(self, n_in=1, n_out=1, n_states=20, solver=forward_iteration,
+                 phi=torch.tanh, always_compute_grad=False, compute_jac_loss=True,
+                 solver_kwargs={'threshold': 200, 'eps':1e-3},
+                 weight_initialization_factor=.1) -> None:
+        super().__init__()
+
+        self.n_states = n_states
+
+        self.implicit = ImplicitLayer(n_in, n_states, phi, solver,
+                                      always_compute_grad, compute_jac_loss,
+                                      solver_kwargs,
+                                      weight_initialization_factor)
+
+        self.C = nn.Linear(n_states,n_out)
+        self.D = nn.Linear(n_in,n_out)
+
+    def forward(self, u: torch.Tensor):
+        if self.training and self.implicit.compute_jac_loss:
+            z_star, jac_loss = self.implicit(u)
+        else:
+            z_star = self.implicit(u)
+
+        y = self.C(z_star) + self.D(u)
+
+        if self.training and self.implicit.compute_jac_loss:
             return y, jac_loss
         else:
             return y
