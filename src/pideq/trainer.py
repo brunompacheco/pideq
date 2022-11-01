@@ -701,26 +701,37 @@ class PINNTrainer(Trainer):
         return losses, times
 
 class PIDEQTrainer(PINNTrainer):
-    def __init__(self, net: PIDEQ, N0=50, Nb=50, Nf=20000, jac_lambda=1.0, A_oo_lambda=0, A_oo_n=4,
-                 val_dt=0.001 * np.pi / 2, epochs=5, lr=0.001,
+    def __init__(self, net: PIDEQ, N0=50, Nb=50, Nf=20000, jac_lambda=0., A_oo_lambda=0., A_oo_n=4,
+                 val_dt=0.001 * np.pi / 2, epochs=5, lr=0.001, kappa=-1,
                  optimizer: str = 'Adam', optimizer_params: dict = None,
-                 lamb=0.1, loss_func: str = 'MSELoss',
+                 lamb=0.1, loss_func: str = 'MSELoss', eps=1e-3,
                  lr_scheduler: str = None, mixed_precision=False,
-                 lr_scheduler_params: dict = None, device=None,
+                 lr_scheduler_params: dict = None, device=None, project_grad=False,
                  wandb_project="pideq-nls", wandb_group=None, logger=None,
-                 checkpoint_every=1000, random_seed=None, max_loss=5):
-        self.jac_lambda = jac_lambda
+                 checkpoint_every=1000, random_seed=None, max_loss=None):
         self.A_oo_lambda = A_oo_lambda
+        self.jac_lambda = jac_lambda
         self.A_oo_n = A_oo_n
+        self.kappa = kappa
+        self.project_grad = project_grad
+        self.eps = eps
+
+        if self.jac_lambda > 0:
+            assert net.implicit.compute_jac_loss
+        else:
+            assert not net.implicit.compute_jac_loss
 
         self._add_to_wandb_config({
             'n_states': net.n_states,
-            'solver_max_nfe': net.solver_kwargs['threshold'],
-            'solver_eps': net.solver_kwargs['eps'],
-            'solver': net.solver.__name__,
-            'jac_lambda': self.jac_lambda,
+            'solver_max_nfe': net.implicit.solver_kwargs['threshold'],
+            'solver_eps': net.implicit.solver_kwargs['eps'],
+            'solver': net.implicit.solver.__name__,
             'A_oo_lambda': self.A_oo_lambda,
+            'jac_lambda': self.jac_lambda,
             'A_oo_n': self.A_oo_n,
+            'kappa': self.kappa,
+            'project_grad': self.project_grad,
+            'eps': self.eps,
         })
 
         super().__init__(net, N0, Nb, Nf, val_dt, epochs, lr, optimizer,
@@ -728,6 +739,69 @@ class PIDEQTrainer(PINNTrainer):
                          mixed_precision, lr_scheduler_params, device,
                          wandb_project, wandb_group, logger, checkpoint_every,
                          random_seed, max_loss)
+
+        if self.kappa > 0:
+            # initialize gradient projection optimization problem
+            # decomposed for each row of A (including bias, assuming x = (x,1))
+            a0 = cp.Parameter(self.net.implicit.A.weight.shape[0] + 1, complex=False)
+            a = cp.Variable(self.net.implicit.A.weight.shape[0] + 1, complex=False)
+            constraint = [cp.norm(a, p=1) <= self.kappa - 1e-3,]
+
+            self._pgd_prob = cp.Problem(cp.Minimize(cp.norm(a - a0, p=2)), constraint)
+
+            # multiprocessing pool for parallelization of gradient projection
+            self._pgd_pool = Pool()
+
+    def _load_optim(self, state_dict=None):
+        if self.bcd_every > 0:
+            Optimizer = eval(f"torch.optim.{self.optimizer}")
+            self._optim = Optimizer(
+                [self.net.implicit.A.weight, self.net.implicit.A.bias, self.net.implicit.B.weight, self.net.implicit.B.bias],
+                lr=self.lr,
+                **self.optimizer_params
+            )
+            if state_dict is not None:
+                self._optim.load_state_dict(state_dict)
+
+            self._optim_CD = torch.optim.LBFGS(
+                [self.net.C.weight, self.net.C.bias, self.net.D.weight, self.net.D.bias],
+            )
+        else:
+            return super()._load_optim(state_dict)
+
+    def project_matrix(self, A0):
+        return_tensor = isinstance(A0, torch.Tensor)
+
+        if return_tensor:
+            A0_ = A0.detach().cpu().numpy()
+        else:
+            A0_ = A0
+
+        A_rows = self._pgd_pool.map(
+            _run_get_a,
+            [(self._pgd_prob,A0_,i) for i in range(A0_.shape[0])]
+        )
+
+        A = np.vstack(A_rows)
+
+        if return_tensor:
+            A = torch.from_numpy(A).to(A0)
+
+        return A
+
+    def project_A(self, A):
+        A0 = np.hstack([  # includes bias for x = (x,1)
+            A.weight.data.detach().cpu().numpy(),
+            A.bias.data.detach().cpu().numpy()[...,None],
+        ])
+
+        A_ = self.project_matrix(A0)
+
+        A_weight = torch.from_numpy(A_[:,:-1]).to(A.weight.data)
+        A_bias = torch.from_numpy(A_[:,-1]).to(A.bias.data)
+
+        A.weight.data.copy_(A_weight)
+        A.bias.data.copy_(A_bias)
 
     def train_pass(self):
         self.net.train()
@@ -749,39 +823,54 @@ class PIDEQTrainer(PINNTrainer):
                     self._optim.zero_grad()
 
                 with self.autocast_if_mp():
-                    Y0_pred, jac_loss_0 = self.net(t0, x0)
+                    if self.jac_lambda > 0:
+                        Y0_pred, jac_loss_0 = self.net(t0, x0)
+                    else:
+                        Y0_pred = self.net(t0, x0)
 
                     global loss_0
                     loss_0 = self._loss_func(Y0_pred, Y0.to(Y0_pred))
 
-                    Yb_low_pred, jac_loss_bl = self.net(tb, xb_low)
-                    Yb_high_pred, jac_loss_bh = self.net(tb, xb_high)
+                    if self.jac_lambda > 0:
+                        Yb_low_pred, jac_loss_bl = self.net(tb, xb_low)
+                        Yb_high_pred, jac_loss_bh = self.net(tb, xb_high)
+                    else:
+                        Yb_low_pred = self.net(tb, xb_low)
+                        Yb_high_pred = self.net(tb, xb_high)
 
                     global loss_b
                     loss_b = self.get_loss_b(Yb_low_pred, Yb_high_pred, xb_low, xb_high)
 
                     global forward_time
-                    forward_time, (Yf_pred, jac_loss_f) = timeit(self.net)(tf, xf)
-                    forward_time -= self.net.jac_loss_time
+                    if self.jac_lambda > 0:
+                        forward_time, (Yf_pred, jac_loss_f) = timeit(self.net)(tf, xf)
+                        forward_time -= self.net.implicit.jac_loss_time
+                    else:
+                        forward_time, Yf_pred = timeit(self.net)(tf, xf)
 
                     global forward_nfe
-                    forward_nfe = self.net.latest_nfe
+                    forward_nfe = self.net.implicit.latest_nfe
 
                     global loss_f, loss_time
                     loss_time, loss_f = timeit(self.get_loss_f)(Yf_pred, xf, tf)
 
                     global backward_nfe
-                    backward_nfe = self.net.latest_backward_nfe
-
-                    global jac_loss
-                    jac_loss = (self.N0 * jac_loss_0 + self.Nb * (jac_loss_bh + jac_loss_bl) + self.Nf * jac_loss_f) \
-                                / (self.N0 + 2 * self.Nb + self.Nf)
+                    backward_nfe = self.net.implicit.latest_backward_nfe
 
                     global loss
-                    loss = (loss_0 + loss_b + loss_f + self.jac_lambda * jac_loss) / (1 + self.jac_lambda)
-                    
+                    loss = (loss_0 + loss_b + loss_f) / (1 + self.jac_lambda)
+
+                    if self.jac_lambda > 0:
+                        global jac_loss
+                        jac_loss = (self.N0 * jac_loss_0 + self.Nb * (jac_loss_bh + jac_loss_bl) + self.Nf * jac_loss_f) \
+                                    / (self.N0 + 2 * self.Nb + self.Nf)
+                        loss += self.jac_lambda * jac_loss
+
                     global A_oo
-                    A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
+                    try:
+                        A_oo = torch.linalg.norm(self.net.implicit.A.weight, ord=torch.inf)
+                    except AttributeError:
+                        A_oo = torch.Tensor([0])
 
                     if self.A_oo_lambda > 0:
                         loss += self.A_oo_lambda * (A_oo ** self.A_oo_n - 1)
@@ -793,6 +882,24 @@ class PIDEQTrainer(PINNTrainer):
                             backward_time, _ = timeit(self._scaler.scale(loss).backward)()
                         else:
                             backward_time, _ = timeit(loss.backward)()
+
+                global grad_proj_time
+                grad_proj_time = 0
+                if self.project_grad:  # project gradient of A
+                    with torch.no_grad():
+                        # project A gradients
+                        A = torch.hstack([self.net.implicit.A.weight.data, self.net.implicit.A.bias.data.unsqueeze(-1)])
+                        A_grad = torch.hstack([self.net.implicit.A.weight.grad, self.net.implicit.A.bias.grad.unsqueeze(-1)])
+                        
+                        # project gradient to be tangent to the constrained space
+                        A0 = A - self.eps * A_grad
+                        if torch.linalg.norm(A0, ord=torch.inf) > self.kappa:
+                            start_time = time()
+                            A_grad = (A - self.project_matrix(A0)) / self.eps
+
+                            self.net.implicit.A.weight.grad.copy_(A_grad[...,:-1].to(self.net.implicit.A.weight.grad))
+                            self.net.implicit.A.bias.grad.copy_(A_grad[...,-1].to(self.net.implicit.A.bias.grad))
+                            grad_proj_time = time() - start_time
 
                 return loss
 
@@ -810,28 +917,40 @@ class PIDEQTrainer(PINNTrainer):
             if self.lr_scheduler is not None:
                 self._scheduler.step()
 
+        # project A matrix
+        A_proj_time = 0
+        global A_oo
+        if A_oo.item() > self.kappa and self.kappa > 0:
+            if self.net.implicit.A.weight.requires_grad:
+                A_proj_time, _ = timeit(self.project_A)(self.net.implicit.A)
+                A_oo = torch.linalg.norm(self.net.implicit.A.weight, ord=torch.inf)
+
         losses = {
             'all': loss.item(),
             '0': loss_0.item(),
             'b': loss_b.item(),
             'f': loss_f.item(),
-            'jac': jac_loss.item(),
             'fwd_nfe': forward_nfe,
             'bwd_nfe': backward_nfe,
             'A_oo': A_oo.item(),
         }
+        if self.jac_lambda > 0:
+            losses['jac'] = jac_loss.item()
         times = {
             'forward': forward_time,
             'loss': loss_time,
             'backward': backward_time,
+            'grad_proj': grad_proj_time,
+            'A_proj': A_proj_time,
         }
+
         return losses, times
 
     def validation_pass(self):
         losses, times = super().validation_pass()
 
-        losses['fwd_nfe'] = self.net.latest_nfe
-        losses['bwd_nfe'] = self.net.latest_backward_nfe
+        losses['fwd_nfe'] = self.net.implicit.latest_nfe
+        losses['bwd_nfe'] = self.net.implicit.latest_backward_nfe
 
         return losses, times
 
@@ -856,12 +975,12 @@ class PIDEQTrainerV2(PIDEQTrainer):
                          wandb_project, wandb_group, logger, checkpoint_every,
                          random_seed, max_loss)
 
-        self.net.compute_jac_loss = False
+        self.net.implicit.compute_jac_loss = False
 
         # initialize gradient projection optimization problem
         # decomposed for each row of A (including bias, assuming x = (x,1))
-        a0 = cp.Parameter(self.net.A.weight.shape[0] + 1, complex=False)
-        a = cp.Variable(self.net.A.weight.shape[0] + 1, complex=False)
+        a0 = cp.Parameter(self.net.implicit.A.weight.shape[0] + 1, complex=False)
+        a = cp.Variable(self.net.implicit.A.weight.shape[0] + 1, complex=False)
         constraint = [cp.norm(a, p=1) <= self.kappa - 1e-3,]
 
         self._pgd_prob = cp.Problem(cp.Minimize(cp.norm(a - a0, p=2)), constraint)
@@ -938,13 +1057,13 @@ class PIDEQTrainerV2(PIDEQTrainer):
                     forward_time, Yf_pred = timeit(self.net)(tf, xf)
 
                     global forward_nfe
-                    forward_nfe = self.net.latest_nfe
+                    forward_nfe = self.net.implicit.latest_nfe
 
                     global loss_f, loss_time
                     loss_time, loss_f = timeit(self.get_loss_f)(Yf_pred, xf, tf)
 
                     global backward_nfe
-                    backward_nfe = self.net.latest_backward_nfe
+                    backward_nfe = self.net.implicit.latest_backward_nfe
 
                     global loss
                     loss = loss_0 + loss_b + loss_f
@@ -974,10 +1093,10 @@ class PIDEQTrainerV2(PIDEQTrainer):
                 self._scheduler.step()
 
         with torch.no_grad():
-            A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
-            if A_oo.item() > self.kappa and self.net.A.requires_grad:
-                grad_proj_time, _ = timeit(self.project_gradient_update)(self.net.A)
-                A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
+            A_oo = torch.linalg.norm(self.net.implicit.A.weight, ord=torch.inf)
+            if A_oo.item() > self.kappa and self.net.implicit.A.requires_grad:
+                grad_proj_time, _ = timeit(self.project_gradient_update)(self.net.implicit.A)
+                A_oo = torch.linalg.norm(self.net.implicit.A.weight, ord=torch.inf)
             else:
                 grad_proj_time = 0
 
@@ -1055,13 +1174,13 @@ class PIDEQTrainerV3(PIDEQTrainerV2):
                     forward_time, Yf_pred = timeit(self.net)(tf, xf)
 
                     global forward_nfe
-                    forward_nfe = self.net.latest_nfe
+                    forward_nfe = self.net.implicit.latest_nfe
 
                     global loss_f, loss_time
                     loss_time, loss_f = timeit(self.get_loss_f)(Yf_pred, xf, tf)
 
                     global backward_nfe
-                    backward_nfe = self.net.latest_backward_nfe
+                    backward_nfe = self.net.implicit.latest_backward_nfe
 
                     global loss
                     loss = loss_0 + loss_b + loss_f
@@ -1083,8 +1202,8 @@ class PIDEQTrainerV3(PIDEQTrainerV2):
 
                 with torch.no_grad():
                     # project A gradients
-                    A = torch.hstack([self.net.A.weight.data, self.net.A.bias.data.unsqueeze(-1)])
-                    A_grad = torch.hstack([self.net.A.weight.grad, self.net.A.bias.grad.unsqueeze(-1)])
+                    A = torch.hstack([self.net.implicit.A.weight.data, self.net.implicit.A.bias.data.unsqueeze(-1)])
+                    A_grad = torch.hstack([self.net.implicit.A.weight.grad, self.net.implicit.A.bias.grad.unsqueeze(-1)])
                     
                     # project gradient to be tangent to the constrained space
                     A0 = A - self.eps * A_grad
@@ -1092,8 +1211,8 @@ class PIDEQTrainerV3(PIDEQTrainerV2):
                         start_time = time()
                         A_grad = (A - self.project_matrix(A0)) / self.eps
 
-                        self.net.A.weight.grad.copy_(A_grad[...,:-1].to(self.net.A.weight.grad))
-                        self.net.A.bias.grad.copy_(A_grad[...,-1].to(self.net.A.bias.grad))
+                        self.net.implicit.A.weight.grad.copy_(A_grad[...,:-1].to(self.net.implicit.A.weight.grad))
+                        self.net.implicit.A.bias.grad.copy_(A_grad[...,-1].to(self.net.implicit.A.bias.grad))
                         grad_proj_time = time() - start_time
                     else:
                         grad_proj_time = 0
@@ -1108,7 +1227,7 @@ class PIDEQTrainerV3(PIDEQTrainerV2):
                 self._scheduler.step()
 
         with torch.no_grad():
-            A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
+            A_oo = torch.linalg.norm(self.net.implicit.A.weight, ord=torch.inf)
             # if A_oo.item() > self.kappa:
             #     grad_proj_time, _ = timeit(self.project_gradient_update)(self.net.A)
             #     A_oo = torch.linalg.norm(self.net.A.weight, ord=torch.inf)
