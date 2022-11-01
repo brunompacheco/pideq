@@ -472,19 +472,24 @@ class DEQTrainer(Trainer):
                  loss_func: str = 'MSELoss', lr_scheduler: str = None, kappa=-1,
                  lr_scheduler_params: dict = None, project_grad=False, eps=1e-3,
                  device=None, wandb_project="pideq-ghaoui", wandb_group=None,
-                 logger=None, checkpoint_every=1000, random_seed=None,
+                 logger=None, checkpoint_every=1000, random_seed=None, jac_lambda=0,
                  max_loss=None, bcd_every=-1):
         self.N = int(N)    # number of points
         self.A_oo_lambda = A_oo_lambda
+        self.jac_lambda = jac_lambda
         self.A_oo_n = A_oo_n
         self.kappa = kappa
         self.project_grad = project_grad
         self.eps = eps
         self.bcd_every = bcd_every
 
+        if self.jac_lambda > 0:
+            assert net.compute_jac_loss
+
         self._add_to_wandb_config({
             'N': self.N,
             'A_oo_lambda': self.A_oo_lambda,
+            'jac_lambda': self.jac_lambda,
             'A_oo_n': self.A_oo_n,
             'kappa': self.kappa,
             'project_grad': self.project_grad,
@@ -532,7 +537,7 @@ class DEQTrainer(Trainer):
             return super()._load_optim(state_dict)
 
     def _run_epoch(self):
-        if self._e % self.bcd_every == 0:
+        if self._e % self.bcd_every == 1:
             self.train_pass_CD()
 
         return super()._run_epoch()
@@ -624,7 +629,11 @@ class DEQTrainer(Trainer):
         with torch.set_grad_enabled(True):
             self._optim.zero_grad()
 
-            forward_time, y_hat = timeit(self.net)(X)
+            if self.jac_lambda > 0:
+                forward_time, (y_hat, jac_loss) = timeit(self.net)(X)
+            else:
+                forward_time, y_hat = timeit(self.net)(X)
+
             y_hat = 6 * y_hat
 
             loss_time, loss = timeit(self._loss_func)(y, y_hat)
@@ -636,6 +645,9 @@ class DEQTrainer(Trainer):
 
             if self.A_oo_lambda > 0:
                 loss += self.A_oo_lambda * (A_oo ** self.A_oo_n - 1)
+
+            if self.jac_lambda > 0:
+                loss += self.jac_lambda * jac_loss
 
             backward_time, _  = timeit(loss.backward)()
 
@@ -675,6 +687,8 @@ class DEQTrainer(Trainer):
             'all': train_loss,
             'A_oo': A_oo.item(),
         }
+        if self.jac_lambda > 0:
+            losses['jac_loss'] = jac_loss.item()
         times = {
             'forward': forward_time,
             'loss': loss_time,
