@@ -34,21 +34,19 @@ if __name__ == '__main__':
 
     for _ in range(5):
         DEQTrainer(
-            DEQ(n_states=75, weight_initialization_factor=1, compute_jac_loss=False),
-            A_oo_lambda=1,
+            DEQ(n_states=75, weight_initialization_factor=1, compute_jac_loss=True),
+            jac_lambda=1,
             wandb_project=wandb_project,
-            wandb_group='DEQ-BCD-reg',
+            wandb_group='DEQ-jac-reg',
             random_seed=seed,
-            bcd_every=100,
         ).run()
 
         DEQTrainer(
-            DEQ(n_states=75, weight_initialization_factor=1, compute_jac_loss=False),
-            kappa=.9,
+            DEQ(n_states=75, weight_initialization_factor=.1, compute_jac_loss=True),
+            jac_lambda=1,
             wandb_project=wandb_project,
-            wandb_group='DEQ-BCD-proj',
+            wandb_group='DEQ-jac-reg-small-init',
             random_seed=seed,
-            bcd_every=100,
         ).run()
 
     # for _ in range(10):
