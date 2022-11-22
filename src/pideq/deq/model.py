@@ -87,7 +87,7 @@ from pideq.deq.solvers import forward_iteration, anderson
 class ImplicitLayer(nn.Module):
     """ Implicit layer inspired in Ghaoui's formulation.
 
-    Given an input `u`, returns the vector `z*` which solves
+    Given an input `u`, returns the vector `z*` that solves
         z* = phi(Az* + Bu)
     where A and B are linear transformations (with bias).
     """
