@@ -10,32 +10,34 @@ from pideq.deq.solvers import anderson, forward_iteration
 
 
 class PhysicsInformedModel(nn.Module,ABC):
-    def __init__(self, T: float) -> None:
+    def __init__(self, T: float, xb=[-1, 1]) -> None:
         super().__init__()
 
         self.T = T
+
+        self.xb = np.array(xb)
     
     @abstractmethod
     def _forward(self, x):
         """Run inner model on (already stacked and normalized) input.
         """
     
-    def forward(self, t, x):
+    def forward(self, x):
         # rescaling the input => better convergence
         # y = self.fcn(t / self.T) + self.eps
-        x_ = torch.hstack((
-            2 * t / self.T - 1,
-            2 * (x - self.xb[0]) / (self.xb[1] - self.xb[0]) - 1
-        ))
+
+        x_ = x
+        # x_ = torch.hstack((
+        #     2 * t / self.T - 1,
+        #     2 * (x - self.xb[0]) / (self.xb[1] - self.xb[0]) - 1
+        # ))
 
         return self._forward(x_)
 
 class PINN(PhysicsInformedModel):
     def __init__(self, T: float, n_in=2, n_out=2, Nonlin=nn.Tanh,
                  n_hidden=4, n_nodes=100, xb=[-5, 5]) -> None:
-        super().__init__(T)
-
-        self.xb = np.array(xb)
+        super().__init__(T, xb)
 
         l = list()
         l.append(nn.Linear(n_in, n_nodes))
@@ -86,7 +88,7 @@ class PIDEQ(PhysicsInformedModel,DEQ):
                  nonlin=torch.tanh, always_compute_grad=False, solver=forward_iteration,
                  solver_kwargs={'threshold': 200, 'eps':1e-4}, xb=[-5, 5],
                  weight_initialization_factor=.1) -> None:
-        PhysicsInformedModel.__init__(self,T)
+        PhysicsInformedModel.__init__(self, T, xb)
         DEQ.__init__(
             self,
             n_in=n_in,
@@ -99,8 +101,6 @@ class PIDEQ(PhysicsInformedModel,DEQ):
             solver_kwargs=solver_kwargs,
             weight_initialization_factor=weight_initialization_factor,
         )
-
-        self.xb = np.array(xb)
 
     def _forward(self, x_):
         return DEQ.forward(self, x_)
