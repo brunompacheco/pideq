@@ -1,88 +1,63 @@
 from time import time
-from turtle import forward
 import numpy as np
 import torch
 import torch.nn as nn
 
+from torch.autograd import Function, grad
+
 from pideq.deq.jacobian import jac_loss_estimate
-from pideq.deq.solvers import forward_iteration, anderson
+from pideq.deq.solvers import forward_iteration
 
 
-# class DEQ(nn.Module):
-#     def __init__(self, n_in=1, n_out=1, n_states=2, nonlin=torch.tanh,
-#                  solver=forward_iteration,
-#                  solver_kwargs={'threshold': 200, 'eps':1e-3}) -> None:
-#         super().__init__()
+def get_implicit(nonlin=torch.tanh, solver=forward_iteration,
+                 forward_max_steps=200, forward_eps=1e-3,
+                 backward_max_steps=200, backward_eps=1e-3):
+    class Implicit(Function):
+        @staticmethod
+        def forward(ctx, x, z0, A_weight, A_bias, B_weight, B_bias):
+            f = lambda x,z: nonlin(z @ A_weight.T + A_bias + x @ B_weight.T + B_bias)
 
-#         A = .01 * (torch.rand(n_states,n_in) * 2 * np.sqrt(n_in) - np.sqrt(n_in))
-#         self.A = nn.Parameter(A, requires_grad=True)
+            with torch.no_grad():
+                # find equilibrium point for f
+                z_star = solver(
+                    lambda z: f(x,z),
+                    z0,
+                    threshold=forward_max_steps,
+                    eps=forward_eps,
+                )['result']
 
-#         B = .01 * (torch.rand(n_states,n_states) * 2 * np.sqrt(n_states) - np.sqrt(n_states))
-#         self.B = nn.Parameter(B, requires_grad=True)
+            ctx.save_for_backward(z_star.detach(), x, A_weight, A_bias, B_weight, B_bias)
+            ctx.solver = solver
+            ctx.nonlin = nonlin
 
-#         b = .01 * (torch.rand(n_states) * 2 * np.sqrt(n_states) - np.sqrt(n_states))
-#         self.b = nn.Parameter(b, requires_grad=True)
+            return z_star
 
-#         self.h = nn.Linear(n_states, n_out)
+        @staticmethod
+        def backward(ctx, grad_output):
+            z, x, A_weight, A_bias, B_weight, B_bias, = ctx.saved_tensors
 
-#         self.solver = solver
+            f = lambda x,z: ctx.nonlin(z @ A_weight.T + A_bias + x @ B_weight.T + B_bias)
 
-#         self.n_in = n_in
-#         self.n_out = n_out
-#         self.n_states = n_states
+            z.requires_grad_()
+            with torch.enable_grad():
+                f_ = f(x,z)
 
-#         self.nonlin = nonlin
+                grad_z = ctx.solver(
+                    lambda g: torch.autograd.grad(f_, z, g, retain_graph=True)[0] + grad_output,
+                    torch.zeros_like(grad_output),
+                    threshold=backward_max_steps,
+                    eps=backward_eps,
+                )['result']
 
-#         class GetEq(torch.autograd.Function):
-#             @staticmethod
-#             def forward(ctx, x, z0, A, B, bias):
-#                 f = lambda x,z: nonlin(x @ A.T + z @ B.T + bias)
+            new_grad_x = torch.autograd.grad(f_, x, grad_z, retain_graph=True)[0]
+            new_grad_A_weight = torch.autograd.grad(f_, A_weight, grad_z, retain_graph=True)[0]
+            new_grad_A_bias = torch.autograd.grad(f_, A_bias, grad_z, retain_graph=True)[0]
+            new_grad_B_weight = torch.autograd.grad(f_, B_weight, grad_z, retain_graph=True)[0]
+            new_grad_B_bias = torch.autograd.grad(f_, B_bias, grad_z, retain_graph=True)[0]
 
-#                 with torch.no_grad():
-#                     z_star = anderson(
-#                         lambda z: f(x,z),
-#                         z0,
-#                         **solver_kwargs,
-#                     )['result']
+            return new_grad_x, None, new_grad_A_weight, new_grad_A_bias, new_grad_B_weight, new_grad_B_bias, None, None
 
-#                 ctx.save_for_backward(z_star.detach(), x, A, B, bias)
-
-#                 return z_star
-
-#             @staticmethod
-#             def backward(ctx, grad_output):
-#                 z, x, A, B, bias, = ctx.saved_tensors
-
-#                 f = lambda x,z: nonlin(x @ A.T + z @ B.T + bias)
-
-#                 z.requires_grad_()
-#                 with torch.enable_grad():
-#                     f_ = f(x,z)
-
-#                     grad_z = solver(
-#                         lambda g: torch.autograd.grad(f_, z, g, retain_graph=True)[0] + grad_output,
-#                         torch.zeros_like(grad_output),
-#                         **solver_kwargs,
-#                     )['result']
-
-#                 new_grad_x = torch.autograd.grad(f_, x, grad_z, retain_graph=True)[0]
-#                 new_grad_A = torch.autograd.grad(f_, A, grad_z, retain_graph=True)[0]
-#                 new_grad_B = torch.autograd.grad(f_, B, grad_z, retain_graph=True)[0]
-#                 new_grad_bias = torch.autograd.grad(f_, bias, grad_z)[0]
-
-#                 return new_grad_x, None, new_grad_A, new_grad_B, new_grad_bias
-
-#         self.get_eq = GetEq()
-
-#     def forward(self, x):
-#         z0 = torch.zeros(x.shape[0], self.n_states).to(x)
-#         z_star = self.get_eq.apply(x, z0, self.A, self.B, self.b)
-
-#         y = self.h(z_star)
-
-#         f = lambda x,z: torch.tanh(x @ self.A.T + z @ self.B.T + self.b)
-
-#         return y, jac_loss_estimate(f(x,z_star), z_star)
+    return Implicit.apply
 
 class ImplicitLayer(nn.Module):
     """ Implicit layer inspired in Ghaoui's formulation.
@@ -216,14 +191,73 @@ class DEQ(nn.Module):
             return y
 
 if __name__ == '__main__':
-    # test gradients of DEQ model
-
     batch_size = 5
 
     n_in = 2
     n_out = 3
     n_states = 4
 
+    # test functional implicit model implementation
+    implicit = get_implicit(forward_max_steps=500, forward_eps=1e-6,
+                            backward_max_steps=500, backward_eps=1e-6)
+
+    x = torch.rand(batch_size, n_in).double()
+    x.requires_grad_()
+    z0 = torch.zeros(batch_size, n_states).double()
+
+    A = nn.Linear(n_states, n_states).double()
+    B = nn.Linear(n_in, n_states).double()
+
+    z = implicit(x, z0, A.weight, A.bias, B.weight, B.bias)
+    # make_dot(z, {'z': z})
+    grad_z = grad(z, x, torch.ones_like(z))[0]
+
+    torch.autograd.gradcheck(
+        lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias),
+        x,
+    )
+    torch.autograd.gradcheck(
+        lambda A_weight: implicit(x, z0, A_weight, A.bias, B.weight, B.bias),
+        A.weight,
+    )
+    torch.autograd.gradcheck(
+        lambda A_bias: implicit(x, z0, A.weight, A_bias, B.weight, B.bias),
+        A.bias,
+    )
+    torch.autograd.gradcheck(
+        lambda B_weight: implicit(x, z0, A.weight, A.bias, B_weight, B.bias),
+        B.weight,
+    )
+    torch.autograd.gradcheck(
+        lambda B_bias: implicit(x, z0, A.weight, A.bias, B.weight, B_bias),
+        B.bias,
+    )
+
+    torch.autograd.gradgradcheck(
+        lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias),
+        x,
+        fast_mode=True,
+        # torch.eye(n_states)[0].double().repeat(5,1),
+        # is_grads_batched=True,
+    )
+    # torch.autograd.gradgradcheck(
+    #     lambda A_weight: implicit(x, z0, A_weight, A.bias, B.weight, B.bias),
+    #     A.weight,
+    # )
+    # torch.autograd.gradgradcheck(
+    #     lambda A_bias: implicit(x, z0, A.weight, A_bias, B.weight, B.bias),
+    #     A.bias,
+    # )
+    # torch.autograd.gradgradcheck(
+    #     lambda B_weight: implicit(x, z0, A.weight, A.bias, B_weight, B.bias),
+    #     B.weight,
+    # )
+    # torch.autograd.gradgradcheck(
+    #     lambda B_bias: implicit(x, z0, A.weight, A.bias, B.weight, B_bias),
+    #     B.bias,
+    # )
+
+    # test gradients of DEQ model
     u = torch.rand(batch_size,n_in).double()
     u.requires_grad_()
 
