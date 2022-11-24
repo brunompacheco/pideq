@@ -1,10 +1,8 @@
 from time import time
-import numpy as np
 import torch
 import torch.nn as nn
 
 from torch.autograd import Function, grad
-from torch.autograd.gradcheck import GradcheckError
 
 from pideq.deq.jacobian import jac_loss_estimate
 from pideq.deq.solvers import forward_iteration
@@ -92,6 +90,15 @@ class ImplicitLayer(nn.Module):
         self.solver = solver
         self.solver_kwargs = solver_kwargs
 
+        self._implicit = get_implicit(
+            nonlin=self.phi,
+            solver=self.solver,
+            forward_max_steps=self.solver_kwargs['threshold'],
+            forward_eps=self.solver_kwargs['eps'],
+            backward_max_steps=self.solver_kwargs['threshold'],
+            backward_eps=self.solver_kwargs['eps'],
+        )
+
         self.always_compute_grad = always_compute_grad
         self.compute_jac_loss = compute_jac_loss
 
@@ -99,67 +106,19 @@ class ImplicitLayer(nn.Module):
         return self.phi(self.A(z) + self.B(u))
 
     def forward(self, u: torch.Tensor):
-        """Based on Locus Lab's implementation.
-        """
         z0 = torch.zeros(u.shape[0], self.out_features).type(u.dtype).to(u.device)
 
-        # compute forward pass
-        with torch.no_grad():
-            solver_out = self.solver(
-                lambda z : self.f(u, z),
-                z0,
-                **self.solver_kwargs
-            )
-            z_star_ = solver_out['result']
-            self.latest_nfe = solver_out['nstep']
-        z_star = self.f(u, z_star_)
-
-        # (Prepare for) Backward pass
-        if self.training or self.always_compute_grad:
-            z_ = z_star.clone().detach().requires_grad_()
-
-            # re-engage autograd. this is necessary to add the df/d(*) hook
-            f_ = self.f(u, z_)
-
-            # Jacobian-related computations
-            if self.training and self.compute_jac_loss:
-                start_time = time()
-                jac_loss = jac_loss_estimate(f_, z_, vecs=1)
-                self.jac_loss_time = time() - start_time
-
-            # new_z_start already has the df/d(*) hook, but the J_g^-1 must be added mannually
-            def backward_hook(grad):
-                # the following is necessary to add breakpoints here:
-                # import pydevd
-                # pydevd.settrace(suspend=False, trace_only_current_thread=True)
-
-                if self.hook is not None:
-                    self.hook.remove()
-                    torch.cuda.synchronize()   # To avoid infinite recursion
-
-                # this fixes a bug that happens every now and then, that the
-                # backwards graph of f_ disappears in the second call of this
-                # hook during loss.backward()
-                with torch.enable_grad():
-                    f_ = self.f(u, z_)
-
-                # Compute the fixed point of yJ + grad, where J=J_f is the
-                # Jacobian of f at z_star. `forward iteration` is the only
-                # solver through which I could backprop (tested with
-                # gradgradcheck).
-                backward_solver_out = forward_iteration(
-                    lambda y: torch.autograd.grad(f_, z_, y, retain_graph=True)[0] + grad,
-                    torch.zeros_like(grad),
-                    **self.solver_kwargs
-                )
-                new_grad = backward_solver_out['result']
-                self.latest_backward_nfe = backward_solver_out['nstep']
-
-                return new_grad
-
-            self.hook = z_star.register_hook(backward_hook)
+        z_star = self._implicit(u, z0, self.A.weight, self.A.bias,
+                               self.B.weight, self.B.bias)
 
         if self.training and self.compute_jac_loss:
+            start_time = time()
+            # z_ = z_star.clone().detach().requires_grad_()
+            z_ = z_star
+            f_ = self.phi(self.A(z_) + self.B(u))
+            jac_loss = jac_loss_estimate(f_, z_, vecs=5)
+            self.jac_loss_time = time() - start_time
+
             return z_star, jac_loss
         else:
             return z_star
@@ -195,6 +154,8 @@ class DEQ(nn.Module):
             return y
 
 if __name__ == '__main__':
+    from torch.autograd.gradcheck import GradcheckError
+
     batch_size = 5
 
     n_in = 2
@@ -290,29 +251,10 @@ if __name__ == '__main__':
     x0 = torch.zeros(u.shape[0], n_states).double()
     x0.requires_grad_()
 
-    deq = DEQ(n_in, n_out, n_states, always_compute_grad=True,
-              solver_kwargs={'threshold': 1000, 'eps': 1e-7})
-    deq = deq.double()
-
-    # torch.autograd.gradcheck(
-    # lambda x: deq.get_eq.apply(u, x0, deq.A, deq.B, deq.b),
-    #     u,
-    #     eps=1e-4,
-    #     atol=1e-5,
-    # )
+    deq = DEQ(n_in, n_out, n_states, always_compute_grad=True, compute_jac_loss=True,
+              solver_kwargs={'threshold': 1000, 'eps': 1e-7}).double()
 
     torch.autograd.gradcheck(
         lambda u: deq(u)[0],
         u,
-        eps=1e-4,
-        atol=1e-5,
-        check_undefined_grad=False,
     )
-
-    # TODO: solve poor jacobian gradient
-    # torch.autograd.gradcheck(
-    #     lambda x: deq(x)[1],
-    #     x,
-    #     eps=1e-1,
-    #     atol=1e-4,
-    # )
