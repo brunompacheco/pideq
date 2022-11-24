@@ -45,3 +45,83 @@ def power_method(f0, z0, n_iters=200):
         evalue = (vTJ * evector).reshape(bsz, -1).sum(1, keepdim=True) / (evector * evector).reshape(bsz, -1).sum(1, keepdim=True)
         evector = (vTJ.reshape(bsz, -1) / vTJ.reshape(bsz, -1).norm(dim=1, keepdim=True)).reshape_as(z0)
     return (evector, torch.abs(evalue))
+
+
+if __name__ == '__main__':
+    from pideq.deq.model import get_implicit
+    from torch.autograd.gradcheck import GradcheckError
+
+    batch_size = 5
+
+    n_in = 2
+    n_out = 3
+    n_states = 4
+
+    x = torch.rand(batch_size, n_in).double()
+    x.requires_grad_()
+    z0 = torch.zeros(batch_size, n_states).double()
+
+    A = nn.Linear(n_states, n_states).double()
+    B = nn.Linear(n_in, n_states).double()
+
+    implicit = get_implicit(forward_max_steps=500, forward_eps=1e-6,
+                            backward_max_steps=500, backward_eps=1e-6)
+    
+    def get_jac_loss(x, A_weight, A_bias, B_weight, B_bias):
+        z0 = torch.zeros(batch_size, n_states).double()
+
+        z = implicit(x, z0, A_weight, A_bias, B_weight, B_bias)
+
+        # Also failed with power method
+        # return power_method(
+        #     torch.tanh(z @ A_weight.T + A_bias + x @ B_weight.T + B_bias),
+        #     z,
+        #     n_iters=500,
+        # )[1]
+
+        return jac_loss_estimate(
+            torch.tanh(z @ A_weight.T + A_bias + x @ B_weight.T + B_bias),
+            z,
+            vecs=2
+        )
+
+    # TODO: check why gradcheck of jac loss fails
+    try:
+        torch.autograd.gradcheck(
+            lambda x: get_jac_loss(x, A.weight, A.bias, B.weight, B.bias),
+            x,
+        )
+    except GradcheckError as e:
+        print('gradcheck failed with respect to x')
+
+    try:
+        torch.autograd.gradcheck(
+            lambda A_weight: get_jac_loss(x, A_weight, A.bias, B.weight, B.bias),
+            A.weight,
+        )
+    except GradcheckError as e:
+        print('gradcheck failed with respect to A.weight')
+
+    try:
+        torch.autograd.gradcheck(
+            lambda A_bias: get_jac_loss(x, A.weight, A_bias, B.weight, B.bias),
+            A.bias,
+        )
+    except GradcheckError as e:
+        print('gradcheck failed with respect to A.bias')
+
+    try:
+        torch.autograd.gradcheck(
+            lambda B_weight: get_jac_loss(x, A.weight, A.bias, B_weight, B.bias),
+            B.weight,
+        )
+    except GradcheckError as e:
+        print('gradcheck failed with respect to A.weight')
+
+    try:
+        torch.autograd.gradcheck(
+            lambda B_bias: get_jac_loss(x, A.weight, A.bias, B.weight, B_bias),
+            B.bias,
+        )
+    except GradcheckError as e:
+        print('gradcheck failed with respect to A.bias')
