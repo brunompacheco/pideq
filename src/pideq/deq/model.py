@@ -8,9 +8,10 @@ from pideq.deq.jacobian import jac_loss_estimate
 from pideq.deq.solvers import forward_iteration
 
 
-def get_implicit(nonlin=torch.tanh, solver=forward_iteration,
+def get_implicit(nonlin=torch.tanh, forward_solver=forward_iteration,
                  forward_max_steps=200, forward_eps=1e-3,
-                 backward_max_steps=200, backward_eps=1e-3):
+                 backward_solver=forward_iteration, backward_max_steps=200,
+                 backward_eps=1e-3):
     class Implicit(Function):
         @staticmethod
         def forward(ctx, x, z0, A_weight, A_bias, B_weight, B_bias):
@@ -18,7 +19,7 @@ def get_implicit(nonlin=torch.tanh, solver=forward_iteration,
 
             with torch.no_grad():
                 # find equilibrium point for f
-                z_star = solver(
+                z_star = forward_solver(
                     lambda z: f(x,z),
                     z0,
                     threshold=forward_max_steps,
@@ -26,7 +27,6 @@ def get_implicit(nonlin=torch.tanh, solver=forward_iteration,
                 )['result']
 
             ctx.save_for_backward(z_star.detach(), x, A_weight, A_bias, B_weight, B_bias)
-            ctx.solver = solver
             ctx.nonlin = nonlin
 
             return z_star
@@ -41,7 +41,7 @@ def get_implicit(nonlin=torch.tanh, solver=forward_iteration,
             with torch.enable_grad():
                 f_ = f(x,z)
 
-                grad_z = ctx.solver(
+                grad_z = backward_solver(
                     lambda g: torch.autograd.grad(f_, z, g, retain_graph=True)[0] + grad_output,
                     torch.zeros_like(grad_output),
                     threshold=backward_max_steps,
@@ -92,9 +92,10 @@ class ImplicitLayer(nn.Module):
 
         self._implicit = get_implicit(
             nonlin=self.phi,
-            solver=self.solver,
+            forward_solver=self._forward_solver,
             forward_max_steps=self.solver_kwargs['threshold'],
             forward_eps=self.solver_kwargs['eps'],
+            backward_solver=self._backward_solver,
             backward_max_steps=self.solver_kwargs['threshold'],
             backward_eps=self.solver_kwargs['eps'],
         )
@@ -102,8 +103,23 @@ class ImplicitLayer(nn.Module):
         self.always_compute_grad = always_compute_grad
         self.compute_jac_loss = compute_jac_loss
 
-    def f(self, u, z):
-        return self.phi(self.A(z) + self.B(u))
+    def _forward_solver(self, *args, **kwargs):
+        """Grab NFEs performed by solver in the forward pass.
+        """
+        solver_out = self.solver(*args, **kwargs)
+
+        self.latest_nfe = solver_out['nstep']
+
+        return solver_out
+
+    def _backward_solver(self, *args, **kwargs):
+        """Grab NFEs performed by solver in the backward pass.
+        """
+        solver_out = self.solver(*args, **kwargs)
+
+        self.latest_backward_nfe = solver_out['nstep']
+
+        return solver_out
 
     def forward(self, u: torch.Tensor):
         z0 = torch.zeros(u.shape[0], self.out_features).type(u.dtype).to(u.device)
