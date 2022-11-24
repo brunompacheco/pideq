@@ -24,71 +24,18 @@ if __name__ == '__main__':
         wandb_project = None
     else:
         seed = None
-        wandb_project = 'pideq-nls'
+        wandb_project = 'pideq-sine'
 
-    T = np.pi / 2
+    T = np.pi
 
     torch.autograd.set_detect_anomaly(True)
     # TODO: check if jac_loss_t is overwhelming the gradients in comparison to jac_loss_f
-    for _ in range(5):
-        try:
-            PIDEQTrainer(
-                PIDEQ(T),
-                epochs=20000,
-                wandb_project=wandb_project,
-                wandb_group='No-Reg',
-                random_seed=seed,
-            ).run()
-        except RuntimeError:
-            pass
-
-        PIDEQTrainer(
-            PIDEQ(T, compute_jac_loss=True),
-            epochs=20000,
-            jac_lambda=0.1,
-            wandb_project=wandb_project,
-            wandb_group='Jac-Loss-small',
-            random_seed=seed,
-        ).run()
-
-        PIDEQTrainer(
-            PIDEQ(T, compute_jac_loss=True),
-            epochs=20000,
-            jac_lambda=1.,
-            wandb_project=wandb_project,
-            wandb_group='Jac-Loss',
-            random_seed=seed,
-        ).run()
-
-        PIDEQTrainer(
-            PIDEQ(T),
-            epochs=20000,
-            A_oo_lambda=1,
-            wandb_project=wandb_project,
-            wandb_group='Aoo-Reg',
-            random_seed=seed,
-        ).run()
-
-        PIDEQTrainer(
-            PIDEQ(T),
-            epochs=20000,
-            kappa=.9,
-            wandb_project=wandb_project,
-            wandb_group='Aoo-Proj',
-            random_seed=seed,
-        ).run()
-
-        PIDEQTrainer(
-            PIDEQ(T),
-            epochs=20000,
-            kappa=.9,
-            project_grad=True,
-            wandb_project=wandb_project,
-            wandb_group='Aoo-Grad-Proj',
-            random_seed=seed,
-        ).run()
-
-        # wandb.alert(
-        #     title='Training finished',
-        #     level=AlertLevel.INFO,
-        # )
+    PIDEQTrainer(
+        PIDEQ(T, n_in=1, n_states=80, compute_jac_loss=True),
+        jac_lambda=10,
+        epochs=10000,
+        wandb_project=wandb_project,
+        wandb_group='test',
+        random_seed=seed,
+        device='cpu',
+    ).run()
