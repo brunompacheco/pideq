@@ -12,6 +12,33 @@ def get_implicit(nonlin=torch.tanh, forward_solver=forward_iteration,
                  forward_max_steps=200, forward_eps=1e-3,
                  backward_solver=forward_iteration, backward_max_steps=200,
                  backward_eps=1e-3):
+    class ImplicitXBackward(Function):
+        @staticmethod
+        def forward(ctx, grad_output, z, x, A_weight, A_bias, B_weight, B_bias):
+            f = lambda x,z: nonlin(z @ A_weight.T + A_bias + x @ B_weight.T + B_bias)
+
+            z.requires_grad_()
+            with torch.enable_grad():
+                f_ = f(x,z)
+
+                grad_z = backward_solver(
+                    lambda g: torch.autograd.grad(f_, z, g, retain_graph=True)[0] + grad_output,
+                    torch.zeros_like(grad_output),
+                    threshold=backward_max_steps,
+                    eps=backward_eps,
+                )['result']
+
+            new_grad_tanh = grad_z.unsqueeze(1) @ torch.diag_embed(1 - torch.pow(f_, 2))
+            new_grad_tanh = new_grad_tanh.squeeze(1)
+            # new_grad_x = torch.autograd.grad(f_, x, grad_z, create_graph=True)[0]
+            new_grad_x = new_grad_tanh @ B_weight
+
+            return new_grad_x
+
+        @staticmethod
+        def backward(ctx, gradgrad_output):
+            return None
+
     class Implicit(Function):
         @staticmethod
         def forward(ctx, x, z0, A_weight, A_bias, B_weight, B_bias):
@@ -27,15 +54,13 @@ def get_implicit(nonlin=torch.tanh, forward_solver=forward_iteration,
                 )['result']
 
             ctx.save_for_backward(z_star.detach(), x, A_weight, A_bias, B_weight, B_bias)
-            ctx.nonlin = nonlin
 
             return z_star
 
         @staticmethod
         def backward(ctx, grad_output):
             z, x, A_weight, A_bias, B_weight, B_bias, = ctx.saved_tensors
-
-            f = lambda x,z: ctx.nonlin(z @ A_weight.T + A_bias + x @ B_weight.T + B_bias)
+            f = lambda x,z: nonlin(z @ A_weight.T + A_bias + x @ B_weight.T + B_bias)
 
             z.requires_grad_()
             with torch.enable_grad():
@@ -48,10 +73,8 @@ def get_implicit(nonlin=torch.tanh, forward_solver=forward_iteration,
                     eps=backward_eps,
                 )['result']
 
-            # new_grad_tanh = grad_z.unsqueeze(1) @ torch.diag_embed(1 - torch.pow(f_, 2))
-            # new_grad_tanh = new_grad_tanh.squeeze(1)
-            new_grad_x = torch.autograd.grad(f_, x, grad_z, create_graph=True)[0]
-            # new_grad_x = new_grad_tanh @ B_weight
+            new_grad_x = ImplicitXBackward.apply(grad_output, *ctx.saved_tensors)
+
             new_grad_A_weight = torch.autograd.grad(f_, A_weight, grad_z, create_graph=True)[0]
             new_grad_A_bias = torch.autograd.grad(f_, A_bias, grad_z, create_graph=True)[0]
             new_grad_B_weight = torch.autograd.grad(f_, B_weight, grad_z, create_graph=True)[0]
@@ -191,7 +214,8 @@ if __name__ == '__main__':
 
     z = implicit(x, z0, A.weight, A.bias, B.weight, B.bias)
     # make_dot(z, {'z': z})
-    grad_z = grad(z, x, torch.ones_like(z))[0]
+    grad_z = grad(z, x, torch.ones_like(z), create_graph=True)[0]
+    gradgrad_z = grad(grad_z, x, torch.ones_like(grad_z))[0]
 
     torch.autograd.gradcheck(
         lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias),
@@ -215,14 +239,14 @@ if __name__ == '__main__':
         B.bias,
     )
 
-    try:
-        torch.autograd.gradgradcheck(
-            lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias),
-            x,
-            atol=1e-3,
-        )
-    except GradcheckError as e:
-        print('gradgrad failed with respect to x')
+    # try:
+    #     torch.autograd.gradgradcheck(
+    #         lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias),
+    #         x,
+    #         atol=1e-3,
+    #     )
+    # except GradcheckError as e:
+    #     print('gradgrad failed with respect to x')
 
     try:
         torch.autograd.gradgradcheck(
