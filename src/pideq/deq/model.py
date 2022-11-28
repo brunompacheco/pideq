@@ -48,10 +48,10 @@ def get_implicit(nonlin=torch.tanh, forward_solver=forward_iteration,
                     eps=backward_eps,
                 )['result']
 
-            new_grad_tanh = grad_z.unsqueeze(1) @ torch.diag_embed(1 - torch.pow(f_, 2))
-            new_grad_tanh = new_grad_tanh.squeeze(1)
-            # new_grad_x = torch.autograd.grad(f_, x, grad_z, create_graph=True)[0]
-            new_grad_x = new_grad_tanh @ B_weight
+            # new_grad_tanh = grad_z.unsqueeze(1) @ torch.diag_embed(1 - torch.pow(f_, 2))
+            # new_grad_tanh = new_grad_tanh.squeeze(1)
+            new_grad_x = torch.autograd.grad(f_, x, grad_z, create_graph=True)[0]
+            # new_grad_x = new_grad_tanh @ B_weight
             new_grad_A_weight = torch.autograd.grad(f_, A_weight, grad_z, create_graph=True)[0]
             new_grad_A_bias = torch.autograd.grad(f_, A_bias, grad_z, create_graph=True)[0]
             new_grad_B_weight = torch.autograd.grad(f_, B_weight, grad_z, create_graph=True)[0]
