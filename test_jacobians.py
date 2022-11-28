@@ -9,7 +9,6 @@ from pideq.deq.model import get_implicit
 from pideq.utils import get_jacobian
 
 
-
 if __name__ == '__main__':
     batch_size = 5
 
@@ -55,3 +54,9 @@ if __name__ == '__main__':
 
     assert torch.isclose(autograd_Jzx, J_zx).all(), "Jacobian generated with autograd is different from the analytical one"
     assert torch.isclose(functional_Jzx, J_zx).all(), "Jacobian generated with functional.Jacobian is different from the analytical one"
+
+    # TODO: implement analytical Hessian
+
+    autograd_Hzxx = get_jacobian(J_zx, x)
+
+    print('DONE')
