@@ -27,16 +27,27 @@ def debugger_is_active() -> bool:
     gettrace = getattr(sys, 'gettrace', lambda : None) 
     return gettrace() is not None
 
-def get_jacobian(Y, x_):
-    """Compute the jacobian of a vector->vector function using `autograd.grad`.
+def get_jacobian(Y, x):
+    """Compute the jacobian of a vector->tensor function using `autograd.grad`.
+
+    Args:
+        Y: Function batched output. Must have shape (b x m1 x ... x mk), in which b
+        is the batch dimension and k >= 1.
+        x: Input with respect to which to differentiate. Has shape (b x n).
+    
+    Returns:
+        J: Jacobian of Y with respect to x. Has shape (b x m1 x ... x mk x n).
     """
+    y_shape = Y.shape[1:]
+    Y_ = Y.flatten(start_dim=1)  # encode matrix output as a vector
     grads_y = list()
-    for i in range(Y.shape[1]):
-        grad_y = grad(Y[:,i].sum(), x_, create_graph=True)[0]
+    for i in range(Y_.shape[1]):
+        grad_y = grad(Y_[:,i].sum(), x, create_graph=True)[0]
         grad_y = grad_y.unsqueeze(1)  # effectively transposing each vector of the batch
 
         grads_y.append(grad_y)
 
     J = torch.cat(grads_y, dim=1)
+    J = J.unflatten(dim=1, sizes=y_shape)  # recover original output's shape
 
     return J
