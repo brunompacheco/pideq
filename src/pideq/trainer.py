@@ -728,6 +728,7 @@ class PIDEQTrainer(PINNTrainer):
 
         # training data
         (X0, Y0), Xf = self.data
+        X0.requires_grad_()
         Xf.requires_grad_()
         with torch.set_grad_enabled(True):
             def closure():
