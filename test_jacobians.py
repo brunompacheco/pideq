@@ -9,6 +9,25 @@ from pideq.deq.model import get_implicit
 from pideq.utils import get_jacobian
 
 
+def nmode_product(A, U, n):
+    """Performs n-mode product between tensor A and matrix U.
+    """
+    B = torch.tensordot(A, U, ([n,], [0,]))
+
+    # torch.tensordot contracts the n-th mode and stacks it at the last
+    # mode of B, so we must perform a permute operation to get the expected
+    # shape
+
+    dims = torch.arange(len(A.shape))
+    dims[n] = -1
+    try:
+        # only if n is not the last dimension
+        dims[n+1:] -= 1
+    except IndexError:
+        pass
+
+    return B.permute(torch.Size(dims))
+
 if __name__ == '__main__':
     batch_size = 5
 
@@ -56,6 +75,11 @@ if __name__ == '__main__':
     assert torch.isclose(functional_Jzx, J_zx).all(), "Jacobian generated with functional.Jacobian is different from the analytical one"
 
     # TODO: implement analytical Hessian
+
+    H_tanh = torch.diag_embed(J_tanh * torch.diag_embed(-2*z))
+
+    print(nmode_product(H_tanh, B.weight, 2).shape)
+    print(nmode_product(H_tanh, B.weight, 1).shape)
 
     autograd_Hzxx = get_jacobian(J_zx, x)
 
