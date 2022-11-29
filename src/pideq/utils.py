@@ -28,7 +28,11 @@ def debugger_is_active() -> bool:
     return gettrace() is not None
 
 def get_jacobian(Y, x):
-    """Compute the jacobian of a vector->tensor function using `autograd.grad`.
+    """Compute the Jacobian of a vector->tensor function using `autograd.grad`.
+
+    Computing the Jacobian of a vector->matrix product is useful for computing
+    the Hessian of a given function. In this case, Y can be the Jacobian, which
+    can also be computed through this function.
 
     Args:
         Y: Function batched output. Must have shape (b x m1 x ... x mk), in which b
