@@ -1,5 +1,7 @@
 """Test Jacobians of implicit functions with dummy data.
 """
+import numpy as np
+import scipy as sp
 import torch
 import torch.nn as nn
 
@@ -9,10 +11,22 @@ from pideq.deq.model import get_implicit
 from pideq.utils import get_jacobian
 
 
-def nmode_product(A, U, n):
+def batched_nmode_product(A, U, n:int):
+    """Performs n-mode product between batches of tensors and matrices.
+
+    TODO: make efficient, not iterative.
+    """
+    assert A.shape[0] == U.shape[0], "different batch sizes"
+    Bs = list()
+    for b in range(A.shape[0]):
+        Bs.append(nmode_product(A[b], U[b], n-1))
+    
+    return torch.stack(Bs)
+
+def nmode_product(A, U, n: int):
     """Performs n-mode product between tensor A and matrix U.
     """
-    B = torch.tensordot(A, U, ([n,], [0,]))
+    B = torch.tensordot(A, U.T, ([n,], [0,]))
 
     # torch.tensordot contracts the n-th mode and stacks it at the last
     # mode of B, so we must perform a permute operation to get the expected
@@ -26,7 +40,7 @@ def nmode_product(A, U, n):
     except IndexError:
         pass
 
-    return B.permute(torch.Size(dims))
+    return B.permute(list(dims))
 
 if __name__ == '__main__':
     batch_size = 5
@@ -59,14 +73,15 @@ if __name__ == '__main__':
 
     z = implicit(x, z0, A.weight, A.bias, B.weight, B.bias)
 
-    # analytical Jacobian
+    # explicit Jacobian
+    # WARNING: do not backpropagate through the explicit Jacobians
     J_tanh = torch.diag_embed(1-z**2)
     J_fx = J_tanh @ B.weight
     J_fz = J_tanh @ A.weight
-    J_zx = -torch.linalg.inv(J_fz - torch.eye(n_states)) @ J_fx
+    implicit_inv = torch.linalg.inv(J_fz - torch.eye(n_states))
+    J_zx = -implicit_inv @ J_fx
 
-    # make_dot(z, {'z': z})
-    # grad_z = grad(z, x, torch.ones_like(z), create_graph=True)[0]
+    # automatic Jacobians
     autograd_Jzx = get_jacobian(z, x)
     functional_Jzx = torch.autograd.functional.jacobian(lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias), x, create_graph=True)
     functional_Jzx = torch.diagonal(functional_Jzx, dim1=0, dim2=2).transpose(2,1).transpose(1,0)
@@ -74,13 +89,24 @@ if __name__ == '__main__':
     assert torch.isclose(autograd_Jzx, J_zx).all(), "Jacobian generated with autograd is different from the analytical one"
     assert torch.isclose(functional_Jzx, J_zx).all(), "Jacobian generated with functional.Jacobian is different from the analytical one"
 
-    # TODO: implement analytical Hessian
+    # y = torch.randn(1,1)
+    # y.requires_grad_()
+    # z = torch.tanh(y)
+    # J_zy = 1 - z**2
+    # autograd_Jzy = get_jacobian(z, y)
 
+    # H_zyy = J_zy * (-2 * z)
+    # autograd_Hzyy = get_jacobian(J_zy, y)
+    # TODO: implement analytical Hessian
     H_tanh = torch.diag_embed(J_tanh * torch.diag_embed(-2*z))
 
-    print(nmode_product(H_tanh, B.weight, 2).shape)
-    print(nmode_product(H_tanh, B.weight, 1).shape)
+    H_fxx = nmode_product(nmode_product(H_tanh, B.weight.T, 3), B.weight.T, 2)
+    H_fzx = nmode_product(nmode_product(H_tanh, B.weight.T, 3), A.weight.T, 2)
 
-    autograd_Hzxx = get_jacobian(J_zx, x)
+    H_zxx = - batched_nmode_product(
+        H_fxx + batched_nmode_product(H_fzx, J_zx.transpose(1,2), 2),
+        implicit_inv,
+        1
+    )
 
     print('DONE')
