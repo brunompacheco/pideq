@@ -11,6 +11,36 @@ from pideq.deq.model import get_implicit
 from pideq.utils import get_jacobian
 
 
+def numerical_jacobian(f, x0, batched=False):
+    x_shape = list(x0.shape)
+    _y = f(x0)
+    y_shape = list(_y.shape)
+
+    def f_(x, i):
+        x_ = torch.from_numpy(x).to(x0)
+        x_ = x_.unflatten(dim=0, sizes=x_shape)
+        y_ = f(x_)
+        y = y_.flatten().detach().cpu().numpy()
+
+        return y[i]
+
+    x0_ = x0.flatten().detach().cpu().numpy()
+    jacs = list()
+    for i in range(_y.flatten().shape[0]):
+        jac = sp.optimize.approx_fprime(x0_, f_, 1e-8, i)
+        jac = torch.from_numpy(jac).to(x0).unflatten(dim=0, sizes=x_shape)
+        jacs.append(jac)
+
+    J = torch.stack(jacs)
+    J = J.unflatten(dim=0, sizes=y_shape)
+
+    if batched:
+        J = torch.diagonal(J, dim1=0, dim2=len(y_shape))
+        ax_J = torch.arange(len(J.shape))
+        J = J.permute((ax_J - 1).tolist())
+
+    return J
+
 def batched_nmode_product(A, U, n:int):
     """Performs n-mode product between batches of tensors and matrices.
 
@@ -56,6 +86,8 @@ if __name__ == '__main__':
 
     ### SYNTHETIC TESTS
 
+    ### Jacobians
+
     x = torch.ones(batch_size, n_in).double()
     x.requires_grad_()
 
@@ -86,18 +118,14 @@ if __name__ == '__main__':
     functional_Jzx = torch.autograd.functional.jacobian(lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias), x, create_graph=True)
     functional_Jzx = torch.diagonal(functional_Jzx, dim1=0, dim2=2).transpose(2,1).transpose(1,0)
 
+    numerical_Jzx = numerical_jacobian(lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias), x, batched=True)
+
     assert torch.isclose(autograd_Jzx, J_zx).all(), "Jacobian generated with autograd is different from the analytical one"
     assert torch.isclose(functional_Jzx, J_zx).all(), "Jacobian generated with functional.Jacobian is different from the analytical one"
+    assert torch.isclose(numerical_Jzx, J_zx).all(), "Jacobian generated with sp.approx_fprime is different from the analytical one"
 
-    # y = torch.randn(1,1)
-    # y.requires_grad_()
-    # z = torch.tanh(y)
-    # J_zy = 1 - z**2
-    # autograd_Jzy = get_jacobian(z, y)
+    ### Hessians
 
-    # H_zyy = J_zy * (-2 * z)
-    # autograd_Hzyy = get_jacobian(J_zy, y)
-    # TODO: implement analytical Hessian
     H_tanh = torch.diag_embed(J_tanh * torch.diag_embed(-2*z))
 
     H_fxx = nmode_product(nmode_product(H_tanh, B.weight.T, 3), B.weight.T, 2)
@@ -108,5 +136,26 @@ if __name__ == '__main__':
         implicit_inv,
         1
     )
+
+    f_ = lambda x, z: torch.tanh(z @ A.weight.T + A.bias + x @ B.weight.T + B.bias)
+
+    def get_Jfx(x):
+        x.requires_grad_()
+        return get_jacobian(f_(x, z), x)
+    numerical_Hfxx = numerical_jacobian(get_Jfx, x, batched=True)
+    assert torch.isclose(numerical_Hfxx, H_fxx).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
+
+    def get_Jfz(x):
+        z.requires_grad_()
+        return get_jacobian(f_(x, z), z)
+    numerical_Hfzx = numerical_jacobian(get_Jfz, x, batched=True)
+    assert torch.isclose(numerical_Hfzx, H_fzx).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
+
+    def get_Jzx(x):
+        x.requires_grad_()
+        z = implicit(x, z0, A.weight, A.bias, B.weight, B.bias)
+        return get_jacobian(z, x)
+    numerical_Hzxx = numerical_jacobian(get_Jzx, x, batched=True)
+    assert torch.isclose(numerical_Hzxx, H_zxx).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
 
     print('DONE')
