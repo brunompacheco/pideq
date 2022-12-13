@@ -1,9 +1,11 @@
 import sys
 
-import wandb
-
+import scipy as sp
 import torch
 import torch.nn as nn
+import wandb
+import tensorly as tl
+tl.set_backend('pytorch')
 
 from torch.autograd import grad
 
@@ -55,3 +57,64 @@ def get_jacobian(Y, x):
     J = J.unflatten(dim=1, sizes=y_shape)  # recover original output's shape
 
     return J
+
+def numerical_jacobian(f, x0, batched=False):
+    x_shape = list(x0.shape)
+    _y = f(x0)
+    y_shape = list(_y.shape)
+
+    def f_(x, i):
+        x_ = torch.from_numpy(x).to(x0)
+        x_ = x_.unflatten(dim=0, sizes=x_shape)
+        y_ = f(x_)
+        y = y_.flatten().detach().cpu().numpy()
+
+        return y[i]
+
+    x0_ = x0.flatten().detach().cpu().numpy()
+    jacs = list()
+    for i in range(_y.flatten().shape[0]):
+        jac = sp.optimize.approx_fprime(x0_, f_, 1e-8, i)
+        jac = torch.from_numpy(jac).to(x0).unflatten(dim=0, sizes=x_shape)
+        jacs.append(jac)
+
+    J = torch.stack(jacs)
+    J = J.unflatten(dim=0, sizes=y_shape)
+
+    if batched:
+        J = torch.diagonal(J, dim1=0, dim2=len(y_shape))
+        ax_J = torch.arange(len(J.shape))
+        J = J.permute((ax_J - 1).tolist())
+
+    return J
+
+def batched_nmode_product(A, U, n:int):
+    """Performs n-mode product between batches of tensors and matrices.
+
+    TODO: make efficient, not iterative.
+    """
+    assert A.shape[0] == U.shape[0], "different batch sizes"
+    Bs = list()
+    for b in range(A.shape[0]):
+        Bs.append(tl.tenalg.mode_dot(A[b], U[b], n-1))
+    
+    return torch.stack(Bs)
+
+def nmode_product(A, U, n: int):
+    """Performs n-mode product between tensor A and matrix U.
+    """
+    B = torch.tensordot(A, U.T, ([n,], [0,]))
+
+    # torch.tensordot contracts the n-th mode and stacks it at the last
+    # mode of B, so we must perform a permute operation to get the expected
+    # shape
+
+    dims = torch.arange(len(A.shape))
+    dims[n] = -1
+    try:
+        # only if n is not the last dimension
+        dims[n+1:] -= 1
+    except IndexError:
+        pass
+
+    return B.permute(list(dims))

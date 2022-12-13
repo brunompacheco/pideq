@@ -1,76 +1,13 @@
 """Test Jacobians of implicit functions with dummy data.
 """
-import numpy as np
-import scipy as sp
 import torch
 import torch.nn as nn
-
-from torch.autograd import grad, Function
+import tensorly as tl
+tl.set_backend('pytorch')
 
 from pideq.deq.model import get_implicit
-from pideq.utils import get_jacobian
+from pideq.utils import get_jacobian, numerical_jacobian, batched_nmode_product
 
-
-def numerical_jacobian(f, x0, batched=False):
-    x_shape = list(x0.shape)
-    _y = f(x0)
-    y_shape = list(_y.shape)
-
-    def f_(x, i):
-        x_ = torch.from_numpy(x).to(x0)
-        x_ = x_.unflatten(dim=0, sizes=x_shape)
-        y_ = f(x_)
-        y = y_.flatten().detach().cpu().numpy()
-
-        return y[i]
-
-    x0_ = x0.flatten().detach().cpu().numpy()
-    jacs = list()
-    for i in range(_y.flatten().shape[0]):
-        jac = sp.optimize.approx_fprime(x0_, f_, 1e-8, i)
-        jac = torch.from_numpy(jac).to(x0).unflatten(dim=0, sizes=x_shape)
-        jacs.append(jac)
-
-    J = torch.stack(jacs)
-    J = J.unflatten(dim=0, sizes=y_shape)
-
-    if batched:
-        J = torch.diagonal(J, dim1=0, dim2=len(y_shape))
-        ax_J = torch.arange(len(J.shape))
-        J = J.permute((ax_J - 1).tolist())
-
-    return J
-
-def batched_nmode_product(A, U, n:int):
-    """Performs n-mode product between batches of tensors and matrices.
-
-    TODO: make efficient, not iterative.
-    """
-    assert A.shape[0] == U.shape[0], "different batch sizes"
-    Bs = list()
-    for b in range(A.shape[0]):
-        Bs.append(nmode_product(A[b], U[b], n-1))
-    
-    return torch.stack(Bs)
-
-def nmode_product(A, U, n: int):
-    """Performs n-mode product between tensor A and matrix U.
-    """
-    B = torch.tensordot(A, U.T, ([n,], [0,]))
-
-    # torch.tensordot contracts the n-th mode and stacks it at the last
-    # mode of B, so we must perform a permute operation to get the expected
-    # shape
-
-    dims = torch.arange(len(A.shape))
-    dims[n] = -1
-    try:
-        # only if n is not the last dimension
-        dims[n+1:] -= 1
-    except IndexError:
-        pass
-
-    return B.permute(list(dims))
 
 if __name__ == '__main__':
     batch_size = 5
@@ -126,36 +63,64 @@ if __name__ == '__main__':
 
     ### Hessians
 
-    H_tanh = torch.diag_embed(J_tanh * torch.diag_embed(-2*z))
-
-    H_fxx = nmode_product(nmode_product(H_tanh, B.weight.T, 3), B.weight.T, 2)
-    H_fzx = nmode_product(nmode_product(H_tanh, B.weight.T, 3), A.weight.T, 2)
-
-    H_zxx = - batched_nmode_product(
-        H_fxx + batched_nmode_product(H_fzx, J_zx.transpose(1,2), 2),
-        implicit_inv,
-        1
-    )
-
     f_ = lambda x, z: torch.tanh(z @ A.weight.T + A.bias + x @ B.weight.T + B.bias)
 
+    H_tanh = torch.diag_embed(J_tanh * torch.diag_embed(-2*z))
+
+    H_fxx = tl.tenalg.mode_dot(tl.tenalg.mode_dot(H_tanh, B.weight.T, 3), B.weight.T, 2)
     def get_Jfx(x):
         x.requires_grad_()
         return get_jacobian(f_(x, z), x)
     numerical_Hfxx = numerical_jacobian(get_Jfx, x, batched=True)
     assert torch.isclose(numerical_Hfxx, H_fxx).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
 
+    H_fzx = tl.tenalg.mode_dot(tl.tenalg.mode_dot(H_tanh, B.weight.T, 3), A.weight.T, 2)
     def get_Jfz(x):
         z.requires_grad_()
         return get_jacobian(f_(x, z), z)
     numerical_Hfzx = numerical_jacobian(get_Jfz, x, batched=True)
     assert torch.isclose(numerical_Hfzx, H_fzx).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
 
+    H_zxx = - batched_nmode_product(
+        H_fxx + batched_nmode_product(H_fzx, J_zx.transpose(1,2), 2),
+        implicit_inv,
+        1
+    )
     def get_Jzx(x):
         x.requires_grad_()
-        z = implicit(x, z0, A.weight, A.bias, B.weight, B.bias)
+        z = implicit(x, z0[:1], A.weight, A.bias, B.weight, B.bias)
         return get_jacobian(z, x)
-    numerical_Hzxx = numerical_jacobian(get_Jzx, x, batched=True)
+    numerical_Hzxx = numerical_jacobian(get_Jzx, x[:1], batched=True)
+    # numerical_Hzxx = numerical_Hzxx[0]
+    assert torch.isclose(numerical_Hzxx, H_zxx).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
+
+    # ignore batch
+    J_zx = J_zx[0]
+    implicit_inv = implicit_inv[0]
+
+    H_fxx = H_fxx[0]
+    H_fzx = H_fzx[0]
+
+    H_zxx = torch.zeros(4,2,2)
+    import numpy as np
+    for (i, j, k), _ in np.ndenumerate(H_zxx.numpy()):
+        # euclidian column vectors
+        ei = torch.eye(4)[i].unsqueeze(-1).to(J_zx)
+        ej = torch.eye(2)[j].unsqueeze(-1).to(J_zx)
+        ek = torch.eye(2)[k].unsqueeze(-1).to(J_zx)
+        ek = torch.eye(2)[k].to(J_zx)
+        
+        H_zxx[i,j,k] = ei.T @ (
+            - implicit_inv @ tl.tenalg.mode_dot(H_fxx, ek, 2)
+            - implicit_inv @ tl.tenalg.mode_dot(H_fzx, ek, 2) @ J_zx
+        ) @ ej
+
+    def get_Jzx(x):
+        x.requires_grad_()
+        z = implicit(x, z0[:1], A.weight, A.bias, B.weight, B.bias)
+        return get_jacobian(z, x)
+    numerical_Hzxx = numerical_jacobian(get_Jzx, x[:1], batched=True)
+    numerical_Hzxx = numerical_Hzxx[0]
     assert torch.isclose(numerical_Hzxx, H_zxx).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
 
     print('DONE')
