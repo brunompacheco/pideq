@@ -1,11 +1,14 @@
 from time import time
 import torch
 import torch.nn as nn
+import tensorly as tl
+tl.set_backend('pytorch')
 
 from torch.autograd import Function, grad
 
 from pideq.deq.jacobian import jac_loss_estimate
 from pideq.deq.solvers import forward_iteration
+from pideq.utils import batched_nmode_product, numerical_jacobian
 
 
 def get_implicit(nonlin=torch.tanh, forward_solver=forward_iteration,
@@ -29,15 +32,23 @@ def get_implicit(nonlin=torch.tanh, forward_solver=forward_iteration,
                 )['result']
 
             # new_grad_tanh = grad_z.unsqueeze(1) @ torch.diag_embed(1 - torch.pow(f_, 2))
-            new_grad_tanh = grad_z * (1 - f_**2)  # faster, but not really correct as J_\phi is the diagonalized vector
-            new_grad_tanh = new_grad_tanh.squeeze(1)
-            # new_grad_x = torch.autograd.grad(f_, x, grad_z, create_graph=True)[0]
-            new_grad_x = new_grad_tanh @ B_weight
 
-            return new_grad_x
+            # new_grad_tanh = grad_z * (1 - f_**2)  # faster, but not really correct as J_\phi is the diagonalized vector
+            # new_grad_tanh = new_grad_tanh.squeeze(1)
+
+            # new_grad_x = new_grad_tanh @ B_weight
+            new_grad_x = torch.autograd.grad(f_, x, grad_z, create_graph=True)[0]
+
+            new_grad_A_weight = torch.autograd.grad(f_, A_weight, grad_z, create_graph=True)[0]
+            new_grad_A_bias = torch.autograd.grad(f_, A_bias, grad_z, create_graph=True)[0]
+            new_grad_B_weight = torch.autograd.grad(f_, B_weight, grad_z, create_graph=True)[0]
+            new_grad_B_bias = torch.autograd.grad(f_, B_bias, grad_z, create_graph=True)[0]
+
+            return new_grad_x, None, new_grad_A_weight, new_grad_A_bias, new_grad_B_weight, new_grad_B_bias, None, None
 
         @staticmethod
         def backward(ctx, gradgrad_output):
+            raise NotImplementedError
             return None
 
     class Implicit(Function):
@@ -60,28 +71,29 @@ def get_implicit(nonlin=torch.tanh, forward_solver=forward_iteration,
 
         @staticmethod
         def backward(ctx, grad_output):
-            z, x, A_weight, A_bias, B_weight, B_bias, = ctx.saved_tensors
-            f = lambda x,z: nonlin(z @ A_weight.T + A_bias + x @ B_weight.T + B_bias)
+            return ImplicitXBackward.apply(grad_output, *ctx.saved_tensors)
+            # z, x, A_weight, A_bias, B_weight, B_bias, = ctx.saved_tensors
+            # f = lambda x,z: nonlin(z @ A_weight.T + A_bias + x @ B_weight.T + B_bias)
 
-            z.requires_grad_()
-            with torch.enable_grad():
-                f_ = f(x,z)
+            # z.requires_grad_()
+            # with torch.enable_grad():
+            #     f_ = f(x,z)
 
-                grad_z = backward_solver(
-                    lambda g: torch.autograd.grad(f_, z, g, retain_graph=True)[0] + grad_output,
-                    torch.zeros_like(grad_output),
-                    threshold=backward_max_steps,
-                    eps=backward_eps,
-                )['result']
+            #     grad_z = backward_solver(
+            #         lambda g: torch.autograd.grad(f_, z, g, retain_graph=True)[0] + grad_output,
+            #         torch.zeros_like(grad_output),
+            #         threshold=backward_max_steps,
+            #         eps=backward_eps,
+            #     )['result']
 
-            new_grad_x = ImplicitXBackward.apply(grad_output, *ctx.saved_tensors)
+            # new_grad_x = ImplicitXBackward.apply(grad_output, *ctx.saved_tensors)
 
-            new_grad_A_weight = torch.autograd.grad(f_, A_weight, grad_z, create_graph=True)[0]
-            new_grad_A_bias = torch.autograd.grad(f_, A_bias, grad_z, create_graph=True)[0]
-            new_grad_B_weight = torch.autograd.grad(f_, B_weight, grad_z, create_graph=True)[0]
-            new_grad_B_bias = torch.autograd.grad(f_, B_bias, grad_z, create_graph=True)[0]
+            # new_grad_A_weight = torch.autograd.grad(f_, A_weight, grad_z, create_graph=True)[0]
+            # new_grad_A_bias = torch.autograd.grad(f_, A_bias, grad_z, create_graph=True)[0]
+            # new_grad_B_weight = torch.autograd.grad(f_, B_weight, grad_z, create_graph=True)[0]
+            # new_grad_B_bias = torch.autograd.grad(f_, B_bias, grad_z, create_graph=True)[0]
 
-            return new_grad_x, None, new_grad_A_weight, new_grad_A_bias, new_grad_B_weight, new_grad_B_bias, None, None
+            # return new_grad_x, None, new_grad_A_weight, new_grad_A_bias, new_grad_B_weight, new_grad_B_bias, None, None
 
     return Implicit.apply
 
@@ -210,7 +222,7 @@ if __name__ == '__main__':
 
     ### SYNTHETIC TESTS
 
-    x = torch.ones(batch_size, n_in).double()
+    x = torch.rand(batch_size, n_in).double()
     x.requires_grad_()
 
     A = nn.Linear(n_states, n_states).double()
@@ -222,18 +234,53 @@ if __name__ == '__main__':
     J_tanh = torch.diag_embed(1-z**2)
     J_fx = J_tanh @ B.weight
     J_fz = J_tanh @ A.weight
-    J_zx = -torch.linalg.inv(J_fz - torch.eye(n_states)) @ J_fx
+    implicit_inv = torch.linalg.inv(J_fz - torch.eye(n_states))
+    J_zx = -implicit_inv @ J_fx
 
     autograd_Jzx = get_jacobian(z, x)
+
     functional_Jzx = torch.autograd.functional.jacobian(lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias), x, create_graph=True)
     functional_Jzx = torch.diagonal(functional_Jzx, dim1=0, dim2=2).transpose(2,1).transpose(1,0)
 
-    assert torch.isclose(autograd_Jzx, J_zx).all(), "Jacobian generated with autograd is different from the analytical one"
-    assert torch.isclose(functional_Jzx, J_zx).all(), "Jacobian generated with functional.Jacobian is different from the analytical one"
-    # gradgrad_z = grad(J_zx.sum(), x)[0]
+    numerical_Jzx = numerical_jacobian(lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias), x, batched=True)
+
+    assert torch.isclose(autograd_Jzx, J_zx, 1e-6, 1e-4).all(), "Jacobian generated with autograd is different from the analytical one"
+    assert torch.isclose(functional_Jzx, J_zx, 1e-6, 1e-4).all(), "Jacobian generated with functional.Jacobian is different from the analytical one"
+    assert torch.isclose(numerical_Jzx, J_zx, 1e-6, 1e-4).all(), "Jacobian generated with sp.approx_fprime is different from the analytical one"
+
+    # analytical Hessian
+    f_ = lambda x, z: torch.tanh(z @ A.weight.T + A.bias + x @ B.weight.T + B.bias)
+
+    H_tanh = torch.diag_embed(J_tanh * torch.diag_embed(-2*z))
+
+    H_fxx = tl.tenalg.mode_dot(tl.tenalg.mode_dot(H_tanh, B.weight.T, 3), B.weight.T, 2)
+    def get_Jfx(x):
+        x.requires_grad_()
+        return get_jacobian(f_(x, z), x)
+    numerical_Hfxx = numerical_jacobian(get_Jfx, x, batched=True)
+    assert torch.isclose(numerical_Hfxx, H_fxx, 1e-6, 1e-4).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
+
+    H_fzx = tl.tenalg.mode_dot(tl.tenalg.mode_dot(H_tanh, B.weight.T, 3), A.weight.T, 2)
+    def get_Jfz(x):
+        z.requires_grad_()
+        return get_jacobian(f_(x, z), z)
+    numerical_Hfzx = numerical_jacobian(get_Jfz, x, batched=True)
+    assert torch.isclose(numerical_Hfzx, H_fzx, 1e-6, 1e-4).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
+
+    H_zxx = - batched_nmode_product(
+        H_fxx + batched_nmode_product(H_fzx, J_zx.transpose(1,2), 2),
+        implicit_inv,
+        1
+    )
+    def get_Jzx(x):
+        x.requires_grad_()
+        z = implicit(x, z0, A.weight, A.bias, B.weight, B.bias)
+        return get_jacobian(z, x)
+    numerical_Hzxx = numerical_jacobian(get_Jzx, x, batched=True)
+    # TODO: fix H_zxx
+    # assert torch.isclose(numerical_Hzxx, H_zxx).all(), "Hessian generated with sp.approx_fprime is different from the analytical one"
 
     ### NUMERICAL TESTS
-
     x = torch.rand(batch_size, n_in).double()
     x.requires_grad_()
     z0 = torch.zeros(batch_size, n_states).double()
@@ -260,14 +307,18 @@ if __name__ == '__main__':
         B.bias,
     )
 
-    # try:
-    #     torch.autograd.gradgradcheck(
-    #         lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias),
-    #         x,
-    #         atol=1e-3,
-    #     )
-    # except GradcheckError as e:
-    #     print('gradgrad failed with respect to x')
+    try:
+        torch.autograd.gradgradcheck(
+            lambda x: implicit(x, z0, A.weight, A.bias, B.weight, B.bias),
+            x,
+            atol=1e-3,
+        )
+    except GradcheckError as e:
+        print('gradgrad failed with respect to x')
+    except NotImplementedError:
+        pass
+    except:
+        print('gradgrad failed with respect to B.bias')
 
     try:
         torch.autograd.gradgradcheck(
@@ -277,6 +328,10 @@ if __name__ == '__main__':
         )
     except GradcheckError as e:
         print('gradgrad failed with respect to A.weight')
+    except NotImplementedError:
+        pass
+    except:
+        print('gradgrad failed with respect to B.bias')
 
     try:
         torch.autograd.gradgradcheck(
@@ -286,6 +341,10 @@ if __name__ == '__main__':
         )
     except GradcheckError as e:
         print('gradgrad failed with respect to A.bias')
+    except NotImplementedError:
+        pass
+    except:
+        print('gradgrad failed with respect to B.bias')
 
     try:
         torch.autograd.gradgradcheck(
@@ -295,6 +354,10 @@ if __name__ == '__main__':
         )
     except GradcheckError as e:
         print('gradgrad failed with respect to B.weight')
+    except NotImplementedError:
+        pass
+    except:
+        print('gradgrad failed with respect to B.bias')
 
     try:
         torch.autograd.gradgradcheck(
@@ -303,6 +366,10 @@ if __name__ == '__main__':
             atol=1e-3,
         )
     except GradcheckError as e:
+        print('gradgrad failed with respect to B.bias')
+    except NotImplementedError:
+        pass
+    except:
         print('gradgrad failed with respect to B.bias')
 
     # test gradients of DEQ model
